@@ -1,0 +1,35 @@
+const Colors = {
+  primary: '#00D9A5',
+  primaryDark: '#00B88A',
+  secondary: '#1C1C1E',
+  accent: '#FF6B35',
+  background: '#F8F9FA',
+  backgroundDark: '#0F0F0F',
+  surface: '#FFFFFF',
+  surfaceDark: '#1C1C1E',
+  text: '#2D3748',
+  textLight: '#718096',
+  textWhite: '#FFFFFF',
+  success: '#34C759',
+  error: '#FF3B30',
+  warning: '#FFCC00',
+  border: '#E2E8F0',
+  borderDark: '#2D2D2D',
+  mapOverlay: 'rgba(255, 255, 255, 0.95)',
+  cardShadow: 'rgba(0, 0, 0, 0.08)',
+  driverOnline: '#34C759',
+  driverOffline: '#FF3B30',
+  rideActive: '#00D9A5',
+  ridePending: '#FFCC00',
+  fareHighlight: '#00D9A5',
+
+  light: {
+    text: '#2D3748',
+    background: '#F8F9FA',
+    tint: '#00D9A5',
+    tabIconDefault: '#718096',
+    tabIconSelected: '#00D9A5',
+  },
+};
+
+export default Colors;
