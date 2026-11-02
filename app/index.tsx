@@ -45,7 +45,7 @@ export default function WelcomeScreen() {
 
   return (
     <LinearGradient
-      colors={['#0F0F0F', '#1C1C1E', '#0F0F0F']}
+      colors={['#101D32', '#172A45', '#101D32']}
       style={styles.container}
     >
       <Pressable
@@ -60,8 +60,8 @@ export default function WelcomeScreen() {
           <View style={styles.logoCircle}>
             <Ionicons name="car-sport" size={44} color={Colors.textWhite} />
           </View>
-          <Text style={styles.appName}>RideFlow</Text>
-          <Text style={styles.tagline}>Better rides, better pay</Text>
+          <Text style={styles.appName}>U-GO LESOTHO</Text>
+          <Text style={styles.tagline}>Your ride. Your journey.</Text>
         </Animated.View>
 
         <Animated.View entering={FadeInDown.delay(400).duration(600)} style={styles.featureList}>
@@ -166,7 +166,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 12,
-    backgroundColor: 'rgba(0, 217, 165, 0.12)',
+    backgroundColor: 'rgba(54, 214, 197, 0.12)',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -199,11 +199,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
-    backgroundColor: 'rgba(0, 217, 165, 0.1)',
+    backgroundColor: 'rgba(54, 214, 197, 0.1)',
     paddingVertical: 16,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(0, 217, 165, 0.3)',
+    borderColor: 'rgba(54, 214, 197, 0.3)',
   },
   secondaryBtnText: {
     fontSize: 17,

@@ -234,15 +234,15 @@ function OverviewTab({ stats, config }: { stats: Stats; config: PlatformConfig |
     <>
       <View style={styles.revenueCard}>
         <Text style={styles.revenueLabel}>Platform Revenue</Text>
-        <Text style={styles.revenueAmount}>${stats.platformRevenue.toFixed(2)}</Text>
+        <Text style={styles.revenueAmount}>{`M${stats.platformRevenue.toFixed(2)}`}</Text>
         <View style={styles.revenueRow}>
           <View style={styles.revenueStat}>
-            <Text style={styles.revenueStatValue}>${stats.totalRevenue.toFixed(2)}</Text>
+            <Text style={styles.revenueStatValue}>{`M${stats.totalRevenue.toFixed(2)}`}</Text>
             <Text style={styles.revenueStatLabel}>Total Fares</Text>
           </View>
           <View style={styles.revDivider} />
           <View style={styles.revenueStat}>
-            <Text style={styles.revenueStatValue}>${stats.totalDriverEarnings.toFixed(2)}</Text>
+            <Text style={styles.revenueStatValue}>{`M${stats.totalDriverEarnings.toFixed(2)}`}</Text>
             <Text style={styles.revenueStatLabel}>Driver Payouts</Text>
           </View>
         </View>
@@ -336,7 +336,7 @@ function RideCard({ ride, statusColor, cancelRide, actionLoading, canCancel }: {
           </Text>
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-          {ride.fare && <Text style={styles.rideFare}>${ride.fare.totalFare.toFixed(2)}</Text>}
+          {ride.fare && <Text style={styles.rideFare}>M{ride.fare.totalFare.toFixed(2)}</Text>}
           {canCancel && (
             <Pressable
               style={styles.cancelBtn}
@@ -428,7 +428,7 @@ function UserCard({ user: u, suspendUser, deleteUser, actionLoading }: {
   const isLoading = actionLoading === u.id;
   return (
     <View style={[styles.userCard, u.suspended && styles.userCardSuspended]}>
-      <View style={[styles.userAvatar, { backgroundColor: u.role === 'driver' ? 'rgba(0,217,165,0.12)' : 'rgba(0,122,255,0.12)' }]}>
+      <View style={[styles.userAvatar, { backgroundColor: u.role === 'driver' ? 'rgba(54, 214, 197, 0.12)' : 'rgba(0,122,255,0.12)' }]}>
         <Ionicons
           name={u.role === 'driver' ? 'car' : 'person'}
           size={20}
@@ -537,11 +537,11 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
     <>
       <Text style={styles.sectionTitle}>Fare Configuration</Text>
       <View style={styles.settingsCard}>
-        <ConfigRow label="Base Fare ($)" value={baseFare} onChange={setBaseFare} />
-        <ConfigRow label="Per Mile ($)" value={perMile} onChange={setPerMile} />
-        <ConfigRow label="Per Minute ($)" value={perMinute} onChange={setPerMinute} />
+        <ConfigRow label="Base Fare (LSL)" value={baseFare} onChange={setBaseFare} />
+        <ConfigRow label="Per KM (LSL)" value={perMile} onChange={setPerMile} />
+        <ConfigRow label="Per Minute (LSL)" value={perMinute} onChange={setPerMinute} />
         <ConfigRow label="Driver Share (%)" value={driverShare} onChange={setDriverShare} />
-        <ConfigRow label="Minimum Fare ($)" value={minFare} onChange={setMinFare} />
+        <ConfigRow label="Minimum Fare (LSL)" value={minFare} onChange={setMinFare} />
       </View>
 
       <Text style={[styles.sectionTitle, { marginTop: 20 }]}>Surge Pricing</Text>
@@ -651,7 +651,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 12,
-    backgroundColor: 'rgba(0,217,165,0.1)',
+    backgroundColor: 'rgba(54, 214, 197, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
   },

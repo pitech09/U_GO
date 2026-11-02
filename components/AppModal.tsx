@@ -123,7 +123,7 @@ function AnimatedSheet({ visible, onClose, title, actions }: Omit<AppModalProps,
                 onPress={() => handleClose(action.onPress)}
               >
                 {action.icon ? (
-                  <View style={[styles.sheetIconWrap, { backgroundColor: action.destructive ? 'rgba(255,59,48,0.1)' : 'rgba(0,217,165,0.1)' }]}>
+                  <View style={[styles.sheetIconWrap, { backgroundColor: action.destructive ? 'rgba(255,59,48,0.1)' : 'rgba(54, 214, 197, 0.1)' }]}>
                     <Ionicons
                       name={action.icon as any}
                       size={20}

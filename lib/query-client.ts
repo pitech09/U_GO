@@ -5,16 +5,23 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
  * Gets the base URL for the Express API server (e.g., "http://localhost:3000")
  * @returns {string} The API base URL
  */
+
 export function getApiUrl(): string {
-  let host = process.env.EXPO_PUBLIC_DOMAIN;
+  const host = process.env.EXPO_PUBLIC_DOMAIN;
 
   if (!host) {
     throw new Error("EXPO_PUBLIC_DOMAIN is not set");
   }
 
-  let url = new URL(`https://${host}`);
+  const normalizedHost = /^https?:\/\//.test(host)
+    ? host
+    : `http://${host}`;
 
-  return url.href;
+  const apiUrl = new URL(normalizedHost).href;
+
+  console.log("RideFlow API URL:", apiUrl);
+
+  return apiUrl;
 }
 
 async function throwIfResNotOk(res: Response) {

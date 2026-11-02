@@ -4,7 +4,11 @@ import {
   ActivityIndicator, Dimensions, ScrollView, Linking, Keyboard,
 } from 'react-native';
 import { router } from 'expo-router';
-import MapView, { Marker, PROVIDER_DEFAULT } from '@/components/MapView';
+import MapView, {
+  Marker,
+  PROVIDER_DEFAULT,
+  CartoTileLayer,
+} from '@/components/MapView';
 import AppModal, { useAppModal } from '@/components/AppModal';
 import * as Location from 'expo-location';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -477,6 +481,7 @@ export default function RiderScreen() {
           ref={mapRef}
           style={StyleSheet.absoluteFillObject}
           provider={PROVIDER_DEFAULT}
+          mapType={Platform.OS === 'android' ? 'none' : 'standard'}
           initialRegion={{
             latitude: location.lat,
             longitude: location.lng,
@@ -487,6 +492,8 @@ export default function RiderScreen() {
           showsMyLocationButton={false}
           onPress={handleMapPress}
         >
+          <CartoTileLayer />
+
           {nearbyDrivers.map((driver) => (
             <Marker
               key={driver.id}
@@ -495,7 +502,7 @@ export default function RiderScreen() {
                 longitude: driver.currentLocation.lng,
               }}
               title={driver.fullName}
-              description={`${driver.distance} mi away`}
+              description={`${driver.distance} KM away`}
             >
               <View style={styles.driverMarker}>
                 <Ionicons name="car" size={16} color={Colors.textWhite} />
@@ -517,6 +524,25 @@ export default function RiderScreen() {
             </Marker>
           )}
         </MapView>
+      )}
+
+      {Platform.OS === 'android' && location && (
+        <View
+          style={{
+            position: 'absolute',
+            top: topInset + 60,
+            alignSelf: 'center',
+            zIndex: 9,
+            backgroundColor: 'rgba(255,255,255,0.88)',
+            paddingHorizontal: 9,
+            paddingVertical: 5,
+            borderRadius: 8,
+          }}
+        >
+          <Text style={{ fontSize: 10, color: '#333' }}>
+            © OpenStreetMap contributors © CARTO
+          </Text>
+        </View>
       )}
 
       <View style={[styles.topBar, { top: topInset + 8 }]}>
@@ -661,14 +687,14 @@ export default function RiderScreen() {
           <View style={styles.fareCard}>
             <View style={styles.fareMain}>
               <Text style={styles.fareLabel}>Estimated Fare</Text>
-              <Text style={styles.farePrice}>${fareEstimate.totalFare.toFixed(2)}</Text>
+              <Text style={styles.farePrice}>M{fareEstimate.totalFare.toFixed(2)}</Text>
             </View>
             <View style={styles.fareDetails}>
-              <FareRow label="Base fare" value={`$${fareEstimate.baseFare.toFixed(2)}`} />
-              <FareRow label={`Distance (${fareEstimate.distance} mi)`} value={`$${fareEstimate.distanceFare.toFixed(2)}`} />
-              <FareRow label={`Time (~${fareEstimate.duration} min)`} value={`$${fareEstimate.timeFare.toFixed(2)}`} />
+              <FareRow label="Base fare" value={`M${fareEstimate.baseFare.toFixed(2)}`} />
+              <FareRow label={`Distance (${fareEstimate.distance} KM)`} value={`M${fareEstimate.distanceFare.toFixed(2)}`} />
+              <FareRow label={`Time (~${fareEstimate.duration} min)`} value={`M${fareEstimate.timeFare.toFixed(2)}`} />
               <View style={styles.fareDivider} />
-              <FareRow label="Driver earns" value={`$${fareEstimate.driverEarnings.toFixed(2)}`} highlight />
+              <FareRow label="Driver earns" value={`M${fareEstimate.driverEarnings.toFixed(2)}`} highlight />
             </View>
           </View>
 
@@ -754,7 +780,7 @@ export default function RiderScreen() {
           {activeRide.fare && (
             <View style={styles.rideFareRow}>
               <Text style={styles.rideFareLabel}>Fare</Text>
-              <Text style={styles.rideFareValue}>${activeRide.fare.totalFare.toFixed(2)}</Text>
+              <Text style={styles.rideFareValue}>M{activeRide.fare.totalFare.toFixed(2)}</Text>
             </View>
           )}
 
@@ -777,7 +803,7 @@ export default function RiderScreen() {
               </View>
               <Text style={styles.completedTitle}>Ride Complete!</Text>
               {activeRide.fare && (
-                <Text style={styles.completedFare}>${activeRide.fare.totalFare.toFixed(2)}</Text>
+                <Text style={styles.completedFare}>M{activeRide.fare.totalFare.toFixed(2)}</Text>
               )}
             </View>
 
@@ -1049,7 +1075,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: Colors.background, borderRadius: 16, padding: 14, marginBottom: 12,
   },
   driverAvatar: {
-    width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(0, 217, 165, 0.12)', justifyContent: 'center', alignItems: 'center',
+    width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(54, 214, 197, 0.12)', justifyContent: 'center', alignItems: 'center',
   },
   driverDetails: { flex: 1 },
   driverName: {

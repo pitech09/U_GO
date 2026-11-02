@@ -4,7 +4,11 @@ import {
   ActivityIndicator, Dimensions, ScrollView, Linking,
 } from 'react-native';
 import { router } from 'expo-router';
-import MapView, { Marker, PROVIDER_DEFAULT } from '@/components/MapView';
+import MapView, {
+  Marker,
+  PROVIDER_DEFAULT,
+  CartoTileLayer,
+} from '@/components/MapView';
 import * as Location from 'expo-location';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -290,10 +294,10 @@ export default function DriverScreen() {
 
           <View style={styles.earningsCard}>
             <Text style={styles.earningsLabel}>Today's Earnings</Text>
-            <Text style={styles.earningsAmount}>${earnings.today.toFixed(2)}</Text>
+            <Text style={styles.earningsAmount}>M{earnings.today.toFixed(2)}</Text>
             <View style={styles.earningsRow}>
               <View style={styles.earningsStat}>
-                <Text style={styles.earningsStatValue}>${earnings.total.toFixed(2)}</Text>
+                <Text style={styles.earningsStatValue}>M{earnings.total.toFixed(2)}</Text>
                 <Text style={styles.earningsStatLabel}>Total</Text>
               </View>
               <View style={styles.earningsDivider} />
@@ -353,7 +357,7 @@ export default function DriverScreen() {
                   </View>
                   {ride.fare && (
                     <Text style={styles.historyEarning}>
-                      +${ride.fare.driverEarnings.toFixed(2)}
+                      +M{ride.fare.driverEarnings.toFixed(2)}
                     </Text>
                   )}
                 </View>
@@ -389,6 +393,7 @@ export default function DriverScreen() {
           ref={mapRef}
           style={StyleSheet.absoluteFillObject}
           provider={PROVIDER_DEFAULT}
+          mapType={Platform.OS === 'android' ? 'none' : 'standard'}
           initialRegion={{
             latitude: location.lat,
             longitude: location.lng,
@@ -398,6 +403,8 @@ export default function DriverScreen() {
           showsUserLocation
           showsMyLocationButton={false}
         >
+          <CartoTileLayer />
+
           {activeRide && (
             <>
               <Marker
@@ -437,6 +444,25 @@ export default function DriverScreen() {
             </Marker>
           ))}
         </MapView>
+      )}
+
+      {Platform.OS === 'android' && location && (
+        <View
+          style={{
+            position: 'absolute',
+            top: topInset + 60,
+            alignSelf: 'center',
+            zIndex: 9,
+            backgroundColor: 'rgba(255,255,255,0.88)',
+            paddingHorizontal: 9,
+            paddingVertical: 5,
+            borderRadius: 8,
+          }}
+        >
+          <Text style={{ fontSize: 10, color: '#333' }}>
+            © OpenStreetMap contributors © CARTO
+          </Text>
+        </View>
       )}
 
       <View style={[styles.topBar, { top: topInset + 8 }]}>
@@ -480,11 +506,11 @@ export default function DriverScreen() {
                 <View style={styles.requestFare}>
                   <View>
                     <Text style={styles.requestFareLabel}>Your earnings</Text>
-                    <Text style={styles.requestFareAmount}>${ride.fare.driverEarnings.toFixed(2)}</Text>
+                    <Text style={styles.requestFareAmount}>M{ride.fare.driverEarnings.toFixed(2)}</Text>
                   </View>
                   <View>
                     <Text style={styles.requestFareLabel}>Distance</Text>
-                    <Text style={styles.requestDistance}>{ride.distance} mi</Text>
+                    <Text style={styles.requestDistance}>{ride.distance} KM</Text>
                   </View>
                 </View>
               )}
@@ -601,7 +627,7 @@ export default function DriverScreen() {
           {activeRide.fare && (
             <View style={styles.rideEarnings}>
               <Text style={styles.rideEarningsLabel}>You'll earn</Text>
-              <Text style={styles.rideEarningsValue}>${activeRide.fare.driverEarnings.toFixed(2)}</Text>
+              <Text style={styles.rideEarningsValue}>M{activeRide.fare.driverEarnings.toFixed(2)}</Text>
             </View>
           )}
         </Animated.View>
@@ -649,8 +675,8 @@ const styles = StyleSheet.create({
   },
   profileBtn: { padding: 4 },
   earningsCard: {
-    backgroundColor: 'rgba(0, 217, 165, 0.08)', borderRadius: 20, padding: 24, marginBottom: 20,
-    borderWidth: 1, borderColor: 'rgba(0, 217, 165, 0.15)',
+    backgroundColor: 'rgba(54, 214, 197, 0.08)', borderRadius: 20, padding: 24, marginBottom: 20,
+    borderWidth: 1, borderColor: 'rgba(54, 214, 197, 0.15)',
   },
   earningsLabel: {
     fontSize: 14, fontFamily: 'Inter_500Medium', color: Colors.primary, marginBottom: 4,

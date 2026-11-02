@@ -39,3 +39,13 @@ yarn-error.*
 .vercel
 
 .env
+
+# U-GO deployment secrets
+.env
+.env.*
+!.env.example
+*.keystore
+
+# Generated deployment builds
+dist/
+server_dist/

@@ -1,7 +1,6 @@
 import { randomUUID } from "crypto";
 import Redis from "ioredis";
 import type { User, Ride, WebhookEvent, UserRole, PlatformConfig } from "@shared/schema";
-import { exec } from "child_process";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -52,31 +51,20 @@ const DEFAULT_CONFIG: PlatformConfig = {
   surgeMultiplier: 1.0,
 };
 
-function ensureRedisRunning(): Promise<void> {
-  return new Promise((resolve) => {
-    exec('redis-cli ping', (error, stdout) => {
-      if (stdout?.trim() === 'PONG') {
-        resolve();
-        return;
-      }
-      console.log('Starting Redis server...');
-      exec('redis-server --bind 127.0.0.1 --port 6379 --appendonly yes --dir /home/runner/workspace --daemonize yes', (err) => {
-        if (err) {
-          console.error('Failed to start Redis:', err.message);
-        }
-        setTimeout(resolve, 1000);
-      });
-    });
-  });
-}
-
 export class RedisStorage implements IStorage {
   private redis: Redis;
 
   constructor() {
-    this.redis = new Redis({
-      host: '127.0.0.1',
-      port: 6379,
+    const redisUrl = process.env.REDIS_URL;
+
+    if (process.env.NODE_ENV === 'production' && !redisUrl) {
+      throw new Error('REDIS_URL must be configured in production');
+    }
+
+    const connectionUrl = redisUrl ||
+      `redis://${process.env.REDIS_HOST || '127.0.0.1'}:${process.env.REDIS_PORT || '6379'}`;
+
+    this.redis = new Redis(connectionUrl, {
       retryStrategy(times) {
         if (times > 10) return null;
         return Math.min(times * 200, 2000);
@@ -86,7 +74,6 @@ export class RedisStorage implements IStorage {
   }
 
   async initialize(): Promise<void> {
-    await ensureRedisRunning();
     await this.redis.connect();
     console.log('Connected to Redis');
 
