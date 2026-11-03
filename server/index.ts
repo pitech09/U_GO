@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
@@ -188,6 +189,16 @@ function configureExpoAndLanding(app: express.Application) {
     }
 
     if (req.path === "/") {
+      const webIndexPath = path.resolve(
+        process.cwd(),
+        "web-build",
+        "index.html",
+      );
+
+      if (fs.existsSync(webIndexPath)) {
+        return res.sendFile(webIndexPath);
+      }
+
       return serveLandingPage({
         req,
         res,
@@ -201,6 +212,11 @@ function configureExpoAndLanding(app: express.Application) {
 
   app.use("/assets", express.static(path.resolve(process.cwd(), "assets")));
   app.use(express.static(path.resolve(process.cwd(), "static-build")));
+  app.use(
+    express.static(path.resolve(process.cwd(), "web-build"), {
+      index: false,
+    }),
+  );
 
   log("Expo routing: Checking expo-platform header on / and /manifest");
 }
@@ -236,6 +252,29 @@ function setupErrorHandler(app: express.Application) {
   configureExpoAndLanding(app);
 
   const server = await registerRoutes(app);
+
+  // Expo Router web fallback: serve the frontend for browser routes.
+  app.get("/{*splat}", (req: Request, res: Response, next: NextFunction) => {
+    if (
+      req.path.startsWith("/api/") ||
+      req.path === "/manifest" ||
+      path.extname(req.path)
+    ) {
+      return next();
+    }
+
+    const webIndexPath = path.resolve(
+      process.cwd(),
+      "web-build",
+      "index.html",
+    );
+
+    if (fs.existsSync(webIndexPath)) {
+      return res.sendFile(webIndexPath);
+    }
+
+    next();
+  });
 
   setupErrorHandler(app);
 

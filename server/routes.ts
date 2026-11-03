@@ -20,49 +20,59 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * c;
 }
 
-let nominatimQueue: Promise<void> = Promise.resolve();
-let lastNominatimRequestAt = 0;
+async function geoapifyRequest(endpoint: string, params: Record<string, string>): Promise<any> {
+  const apiKey = process.env.GEOAPIFY_API_KEY?.trim();
 
-async function searchNominatim(query: string): Promise<any[]> {
-  const request = nominatimQueue.then(async () => {
-    const wait = Math.max(
-      0,
-      1100 - (Date.now() - lastNominatimRequestAt),
-    );
+  if (!apiKey) {
+    throw new Error("GEOAPIFY_API_KEY is not configured");
+  }
 
-    if (wait > 0) {
-      await new Promise(resolve => setTimeout(resolve, wait));
-    }
+  const url = new URL(`https://api.geoapify.com/v1/geocode/${endpoint}`);
 
-    lastNominatimRequestAt = Date.now();
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
 
-    const url = new URL("https://nominatim.openstreetmap.org/search");
-    url.searchParams.set("format", "json");
-    url.searchParams.set("q", query);
-    url.searchParams.set("limit", "5");
-    url.searchParams.set("addressdetails", "0");
+  url.searchParams.set("apiKey", apiKey);
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        "User-Agent": "U-GO-Lesotho/1.0 (https://u-go.onrender.com)",
-        "Accept": "application/json",
-        "Accept-Language": "en",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Nominatim returned HTTP ${response.status}`);
-    }
-
-    return response.json() as Promise<any[]>;
+  const response = await fetch(url.toString(), {
+    headers: { "Accept": "application/json" },
   });
 
-  nominatimQueue = request.then(
-    () => undefined,
-    () => undefined,
-  );
+  if (!response.ok) {
+    throw new Error(`Geoapify returned HTTP ${response.status}`);
+  }
 
-  return request;
+  return response.json();
+}
+
+async function searchGeoapify(query: string): Promise<any[]> {
+  const data = await geoapifyRequest("autocomplete", {
+    text: query,
+    format: "json",
+    limit: "5",
+    lang: "en",
+    filter: "countrycode:ls",
+  });
+
+  return (data.results ?? []).map((item: any) => ({
+    place_id: item.place_id,
+    display_name: item.formatted,
+    lat: String(item.lat),
+    lon: String(item.lon),
+  }));
+}
+
+async function reverseGeocodeGeoapify(lat: number, lon: number): Promise<string | null> {
+  const data = await geoapifyRequest("reverse", {
+    lat: String(lat),
+    lon: String(lon),
+    format: "json",
+    lang: "en",
+    countrycodes: "ls",
+  });
+
+  return data.results?.[0]?.formatted ?? null;
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -81,12 +91,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     try {
-      const results = await searchNominatim(query);
+      const results = await searchGeoapify(query);
       return res.json(results);
     } catch (error) {
       console.error("Destination geocoding failed:", error);
       return res.status(502).json({
         message: "Destination search is temporarily unavailable. Please try again.",
+      });
+    }
+  });
+
+  app.get("/api/geocode/reverse", async (req: Request, res: Response) => {
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) ||
+        lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      return res.status(400).json({ message: "Valid latitude and longitude are required." });
+    }
+
+    try {
+      const displayName = await reverseGeocodeGeoapify(lat, lon);
+      return res.json({ display_name: displayName });
+    } catch (error) {
+      console.error("Reverse geocoding failed:", error);
+      return res.status(502).json({
+        message: "Location lookup is temporarily unavailable.",
       });
     }
   });
