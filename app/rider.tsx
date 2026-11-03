@@ -19,6 +19,7 @@ import Colors from '@/constants/colors';
 import Animated, { FadeInDown, FadeInUp, SlideInDown, FadeIn } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import type { Ride, User } from '@shared/schema';
+import { playRideUpdateSound } from '@/lib/sound-notifications';
 
 const { width, height } = Dimensions.get('window');
 const ASPECT_RATIO = width / height;
@@ -63,6 +64,8 @@ export default function RiderScreen() {
 
   const phaseRef = useRef<RiderPhase>(phase);
   const activeRideRef = useRef<Ride | null>(activeRide);
+  const seenEventIdsRef = useRef<Set<string>>(new Set());
+  const eventsInitializedRef = useRef(false);
   const locationRef = useRef(location);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   useEffect(() => { activeRideRef.current = activeRide; }, [activeRide]);
@@ -94,7 +97,13 @@ export default function RiderScreen() {
   useEffect(() => {
     if (!user?.id) return;
     checkActiveRide();
-    const interval = setInterval(checkActiveRide, 5000);
+    pollUserEvents();
+
+    const interval = setInterval(() => {
+      checkActiveRide();
+      pollUserEvents();
+    }, 5000);
+
     return () => clearInterval(interval);
   }, [user?.id]);
 
@@ -195,6 +204,44 @@ export default function RiderScreen() {
           } else {
             setPhase('idle');
           }
+        }
+      }
+    } catch {}
+  };
+
+  const pollUserEvents = async () => {
+    if (!user?.id) return;
+
+    try {
+      const baseUrl = getApiUrl();
+      const url = new URL(`/api/events/${user.id}`, baseUrl);
+      const res = await fetch(url.toString(), { cache: 'no-store' });
+      if (!res.ok) return;
+
+      const events = await res.json();
+      if (!Array.isArray(events)) return;
+
+      if (!eventsInitializedRef.current) {
+        events.forEach((event: any) => seenEventIdsRef.current.add(event.id));
+        eventsInitializedRef.current = true;
+        return;
+      }
+
+      const soundEvents = new Set([
+        'ride_accepted',
+        'driver_arriving',
+        'driver_arrived',
+        'ride_started',
+        'ride_completed',
+        'ride_cancelled',
+      ]);
+
+      for (const event of [...events].reverse()) {
+        if (seenEventIdsRef.current.has(event.id)) continue;
+        seenEventIdsRef.current.add(event.id);
+
+        if (soundEvents.has(event.type)) {
+          playRideUpdateSound(event.type);
         }
       }
     } catch {}

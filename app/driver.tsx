@@ -18,6 +18,7 @@ import Colors from '@/constants/colors';
 import Animated, { SlideInDown, FadeIn, FadeInUp, FadeInDown } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import type { Ride } from '@shared/schema';
+import { startIncomingRideAlert, stopIncomingRideAlert } from '@/lib/sound-notifications';
 import AppModal, { useAppModal } from '@/components/AppModal';
 
 const { width } = Dimensions.get('window');
@@ -30,6 +31,8 @@ export default function DriverScreen() {
   const insets = useSafeAreaInsets();
   const { user, logout, refreshUser } = useAuth();
   const mapRef = useRef<MapView>(null);
+  const alertedRideIdsRef = useRef<Set<string>>(new Set());
+  const previousAvailableRideIdsRef = useRef<Set<string>>(new Set());
 
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [permissionStatus, setPermissionStatus] = useState<string | null>(null);
@@ -50,14 +53,22 @@ export default function DriverScreen() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      stopIncomingRideAlert();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!user?.id) return;
     fetchRideHistory();
     checkActiveRide();
     refreshUser();
+
     const interval = setInterval(() => {
       checkActiveRide();
-      if (isOnline) fetchPendingRides();
+        if (isOnline) fetchPendingRides();
     }, 4000);
+
     return () => clearInterval(interval);
   }, [user?.id, isOnline]);
 
@@ -126,6 +137,9 @@ export default function DriverScreen() {
         fetchPendingRides();
       } else {
         setPhase('dashboard');
+        alertedRideIdsRef.current.clear();
+        previousAvailableRideIdsRef.current.clear();
+        stopIncomingRideAlert();
       }
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     } catch (e: any) {
@@ -139,7 +153,24 @@ export default function DriverScreen() {
       const url = new URL('/api/rides/available', baseUrl);
       const res = await fetch(url.toString(), { cache: 'no-store' });
       const data = await res.json();
-      setPendingRides(Array.isArray(data) ? data : []);
+      const rides = Array.isArray(data) ? data : [];
+      setPendingRides(rides);
+
+      const availableIds = new Set(rides.map((ride: Ride) => ride.id));
+      const hasNewRide = [...availableIds].some(
+        rideId => !previousAvailableRideIdsRef.current.has(rideId)
+      );
+
+      alertedRideIdsRef.current = availableIds;
+      previousAvailableRideIdsRef.current = availableIds;
+
+      if (isOnline && hasNewRide) {
+        startIncomingRideAlert();
+      }
+
+      if (availableIds.size === 0) {
+        stopIncomingRideAlert();
+      }
     } catch {}
   };
 
@@ -181,6 +212,10 @@ export default function DriverScreen() {
     if (!user?.id) return;
     setLoading(true);
     try {
+      alertedRideIdsRef.current.clear();
+      previousAvailableRideIdsRef.current.clear();
+      stopIncomingRideAlert();
+
       const res = await apiRequest('PUT', `/api/rides/${rideId}/accept`, { driverId: user.id });
       const ride = await res.json();
       setActiveRide(ride);

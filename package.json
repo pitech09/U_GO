@@ -15,7 +15,9 @@
     "start": "expo start",
     "lint": "expo lint",
     "lint:fix": "expo lint --fix",
-    "expo:start:static:build": "expo start --no-dev --minify --localhost --port 8081"
+    "expo:start:static:build": "expo start --no-dev --minify --localhost --port 8081",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
@@ -30,6 +32,7 @@
     "drizzle-zod": "^0.7.0",
     "expo": "~54.0.27",
     "expo-asset": "~12.0.14",
+    "expo-audio": "~1.1.1",
     "expo-blur": "~15.0.8",
     "expo-constants": "~18.0.11",
     "expo-crypto": "^15.0.8",
