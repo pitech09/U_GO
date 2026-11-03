@@ -284,8 +284,12 @@ export default function RiderScreen() {
 
   const reverseGeocodeWeb = async (lat: number, lng: number) => {
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18`);
+      const res = await apiRequest(
+        'GET',
+        `/api/geocode/reverse?lat=${lat}&lon=${lng}`
+      );
       const data = await res.json();
+
       if (data.display_name) {
         const parts = data.display_name.split(',');
         setDropoffAddress(parts.slice(0, 3).join(',').trim());
