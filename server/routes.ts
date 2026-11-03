@@ -4,8 +4,13 @@ import { storage } from "./storage";
 import { registerSchema, loginSchema, requestRideSchema, updateLocationSchema } from "@shared/schema";
 import type { RideStatus } from "@shared/schema";
 
+function getRouteParam(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+}
+
+
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 3959;
+  const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
@@ -58,7 +63,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/user/:id", async (req: Request, res: Response) => {
-    const user = await storage.getUser(req.params.id);
+    const user = await storage.getUser(getRouteParam(req.params.id));
     if (!user) return res.status(404).json({ message: "User not found" });
     const { password: _, ...safe } = user;
     return res.json(safe);
@@ -67,7 +72,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.put("/api/user/:id/location", async (req: Request, res: Response) => {
     try {
       const parsed = updateLocationSchema.parse(req.body);
-      const user = await storage.updateUser(req.params.id, {
+      const user = await storage.updateUser(getRouteParam(req.params.id), {
         currentLocation: { lat: parsed.lat, lng: parsed.lng },
       });
       if (!user) return res.status(404).json({ message: "User not found" });
@@ -79,7 +84,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.put("/api/user/:id/online", async (req: Request, res: Response) => {
     const { isOnline } = req.body;
-    const user = await storage.updateUser(req.params.id, { isOnline });
+    const user = await storage.updateUser(getRouteParam(req.params.id), { isOnline });
     if (!user) return res.status(404).json({ message: "User not found" });
     const { password: _, ...safe } = user;
     return res.json(safe);
@@ -165,7 +170,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/rides/rider/:riderId", async (req: Request, res: Response) => {
-    const rides = await storage.getRidesByRider(req.params.riderId);
+    const rides = await storage.getRidesByRider(getRouteParam(req.params.riderId));
     const sanitized = rides.map(r => {
       if (r.review) return { ...r, review: { rating: r.review.rating, createdAt: r.review.createdAt } };
       return r;
@@ -174,7 +179,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/rides/driver/:driverId", async (req: Request, res: Response) => {
-    const rides = await storage.getRidesByDriver(req.params.driverId);
+    const rides = await storage.getRidesByDriver(getRouteParam(req.params.driverId));
     const sanitized = rides.map(r => {
       if (r.review) return { ...r, review: { rating: r.review.rating, createdAt: r.review.createdAt } };
       return r;
@@ -183,13 +188,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/rides/driver/:driverId/active", async (req: Request, res: Response) => {
-    const rides = await storage.getRidesByDriver(req.params.driverId);
+    const rides = await storage.getRidesByDriver(getRouteParam(req.params.driverId));
     const active = rides.find(r => !['completed', 'cancelled'].includes(r.status));
     return res.json(active || null);
   });
 
   app.get("/api/rides/rider/:riderId/active", async (req: Request, res: Response) => {
-    const rides = await storage.getRidesByRider(req.params.riderId);
+    const rides = await storage.getRidesByRider(getRouteParam(req.params.riderId));
     const active = rides.find(r => !['completed', 'cancelled'].includes(r.status));
     if (active) return res.json(active);
 
@@ -207,7 +212,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/rides/:id", async (req: Request, res: Response) => {
-    const ride = await storage.getRide(req.params.id);
+    const ride = await storage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
     return res.json(ride);
   });
@@ -216,14 +221,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const { driverId } = req.body;
     if (!driverId) return res.status(400).json({ message: "driverId required" });
 
-    const ride = await storage.getRide(req.params.id);
+    const ride = await storage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
     if (ride.status !== 'requested') return res.status(400).json({ message: "Ride already accepted" });
 
     const driver = await storage.getUser(driverId);
     if (!driver) return res.status(404).json({ message: "Driver not found" });
 
-    const updated = await storage.updateRide(req.params.id, {
+    const updated = await storage.updateRide(getRouteParam(req.params.id), {
       driverId,
       driverName: driver.fullName,
       status: 'accepted',
@@ -243,7 +248,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.put("/api/rides/:id/status", async (req: Request, res: Response) => {
     const { status } = req.body as { status: RideStatus };
-    const ride = await storage.getRide(req.params.id);
+    const ride = await storage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
 
     const updates: Partial<typeof ride> = { status };
@@ -266,7 +271,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     }
 
-    const updated = await storage.updateRide(req.params.id, updates);
+    const updated = await storage.updateRide(getRouteParam(req.params.id), updates);
 
     const eventTypeMap: Record<string, string> = {
       arriving: 'driver_arriving',
@@ -299,12 +304,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/events/:userId", async (req: Request, res: Response) => {
-    const events = await storage.getEventsByUser(req.params.userId);
+    const events = await storage.getEventsByUser(getRouteParam(req.params.userId));
     return res.json(events);
   });
 
   app.put("/api/events/:eventId/read", async (req: Request, res: Response) => {
-    await storage.markEventRead(req.params.eventId);
+    await storage.markEventRead(getRouteParam(req.params.eventId));
     return res.json({ success: true });
   });
 
@@ -352,10 +357,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.put("/api/admin/users/:id/suspend", async (req: Request, res: Response) => {
-    const user = await storage.getUser(req.params.id);
+    const user = await storage.getUser(getRouteParam(req.params.id));
     if (!user) return res.status(404).json({ message: "User not found" });
     if (user.role === 'admin') return res.status(403).json({ message: "Cannot suspend admin" });
-    const updated = await storage.updateUser(req.params.id, {
+    const updated = await storage.updateUser(getRouteParam(req.params.id), {
       suspended: !user.suspended,
       isOnline: user.suspended ? user.isOnline : false,
     });
@@ -365,20 +370,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.delete("/api/admin/users/:id", async (req: Request, res: Response) => {
-    const user = await storage.getUser(req.params.id);
+    const user = await storage.getUser(getRouteParam(req.params.id));
     if (!user) return res.status(404).json({ message: "User not found" });
     if (user.role === 'admin') return res.status(403).json({ message: "Cannot remove admin" });
-    await storage.deleteUser(req.params.id);
+    await storage.deleteUser(getRouteParam(req.params.id));
     return res.json({ success: true });
   });
 
   app.put("/api/admin/rides/:id/cancel", async (req: Request, res: Response) => {
-    const ride = await storage.getRide(req.params.id);
+    const ride = await storage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
     if (['completed', 'cancelled'].includes(ride.status)) {
       return res.status(400).json({ message: "Ride already " + ride.status });
     }
-    const updated = await storage.updateRide(req.params.id, {
+    const updated = await storage.updateRide(getRouteParam(req.params.id), {
       status: 'cancelled',
       completedAt: new Date().toISOString(),
     });
@@ -400,7 +405,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (!rating || rating < 1 || rating > 5) {
       return res.status(400).json({ message: "Rating must be between 1 and 5" });
     }
-    const ride = await storage.getRide(req.params.id);
+    const ride = await storage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
     if (ride.status !== 'completed') return res.status(400).json({ message: "Can only review completed rides" });
     if (ride.review) return res.status(400).json({ message: "Ride already reviewed" });
@@ -410,7 +415,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       comment: comment?.trim() || undefined,
       createdAt: new Date().toISOString(),
     };
-    const updated = await storage.updateRide(req.params.id, { review });
+    const updated = await storage.updateRide(getRouteParam(req.params.id), { review });
 
     if (ride.driverId) {
       const driverRides = await storage.getRidesByDriver(ride.driverId);
@@ -424,7 +429,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/rides/rider/:riderId/recent-completed", async (req: Request, res: Response) => {
-    const rides = await storage.getRidesByRider(req.params.riderId);
+    const rides = await storage.getRidesByRider(getRouteParam(req.params.riderId));
     const completed = rides.find(r => r.status === 'completed' && !r.review);
     return res.json(completed || null);
   });
@@ -439,24 +444,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(400).json({ message: "Coordinates required" });
     }
 
-    const config = await storage.getConfig();
     const distance = calculateDistance(pLat, pLng, dLat, dLng);
-    const estimatedMinutes = distance * 3;
-    const distanceFare = distance * config.perMile;
-    const timeFare = estimatedMinutes * config.perMinute;
-    let totalFare = Math.max(config.baseFare + distanceFare + timeFare, config.minimumFare);
-    if (config.surgePricing) totalFare *= config.surgeMultiplier;
-    const driverPercent = config.driverSharePercent / 100;
+    const duration = Math.round(distance * (3 / 1.609344));
+    const fare = await storage.calculateFareForDistance(distance);
 
     return res.json({
       distance: Math.round(distance * 10) / 10,
-      duration: Math.round(estimatedMinutes),
-      baseFare: Math.round(config.baseFare * 100) / 100,
-      distanceFare: Math.round(distanceFare * 100) / 100,
-      timeFare: Math.round(timeFare * 100) / 100,
-      totalFare: Math.round(totalFare * 100) / 100,
-      driverEarnings: Math.round(totalFare * driverPercent * 100) / 100,
-      platformFee: Math.round(totalFare * (1 - driverPercent) * 100) / 100,
+      duration,
+      ...fare,
     });
   });
 

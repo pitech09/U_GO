@@ -27,7 +27,7 @@ export interface User {
 
 export interface PlatformConfig {
   baseFare: number;
-  perMile: number;
+  perKm: number;
   perMinute: number;
   driverSharePercent: number;
   minimumFare: number;

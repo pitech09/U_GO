@@ -293,7 +293,7 @@ export default function DriverScreen() {
           </View>
 
           <View style={styles.earningsCard}>
-            <Text style={styles.earningsLabel}>Today's Earnings</Text>
+            <Text style={styles.earningsLabel}>Today&apos;s Earnings</Text>
             <Text style={styles.earningsAmount}>M{earnings.today.toFixed(2)}</Text>
             <View style={styles.earningsRow}>
               <View style={styles.earningsStat}>
@@ -370,13 +370,13 @@ export default function DriverScreen() {
             <View style={styles.compCard}>
               <View style={styles.compRow}>
                 <Text style={styles.compLabel}>Your share</Text>
-                <Text style={styles.compValue}>82%</Text>
+                <Text style={styles.compValue}>88%</Text>
               </View>
               <View style={styles.compBar}>
-                <View style={[styles.compFill, { width: '82%' }]} />
+                <View style={[styles.compFill, { width: '88%' }]} />
               </View>
               <Text style={styles.compNote}>
-                You keep 82% of every fare - higher than industry average
+                You keep 88% of every fare - higher than industry average
               </Text>
             </View>
           </View>
@@ -566,7 +566,7 @@ export default function DriverScreen() {
               disabled={loading}
             >
               <Ionicons name="flag" size={20} color={Colors.secondary} />
-              <Text style={styles.arrivedBtnText}>I've Arrived</Text>
+              <Text style={styles.arrivedBtnText}>I&apos;ve Arrived</Text>
             </Pressable>
           </View>
         </Animated.View>
@@ -626,7 +626,7 @@ export default function DriverScreen() {
 
           {activeRide.fare && (
             <View style={styles.rideEarnings}>
-              <Text style={styles.rideEarningsLabel}>You'll earn</Text>
+              <Text style={styles.rideEarningsLabel}>You&apos;ll earn</Text>
               <Text style={styles.rideEarningsValue}>M{activeRide.fare.driverEarnings.toFixed(2)}</Text>
             </View>
           )}
