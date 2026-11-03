@@ -29,6 +29,13 @@ function setupCors(app: express.Application) {
       });
     }
 
+    if (process.env.CORS_ALLOWED_ORIGINS) {
+      process.env.CORS_ALLOWED_ORIGINS.split(",").forEach((value) => {
+        const allowedOrigin = value.trim().replace(/\/+$/, "");
+        if (allowedOrigin) origins.add(allowedOrigin);
+      });
+    }
+
     const origin = req.header("origin");
 
     // Allow localhost origins for Expo web development (any port)
