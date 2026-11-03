@@ -13,13 +13,16 @@ export function getApiUrl(): string {
     throw new Error("EXPO_PUBLIC_DOMAIN is not set");
   }
 
-  const normalizedHost = /^https?:\/\//.test(host)
+  const isLocalHost =
+    /^(localhost|127(?:\.\d{1,3}){3}|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(?::\d+)?$/i.test(host);
+
+  const normalizedHost = /^https?:\/\//i.test(host)
     ? host
-    : `http://${host}`;
+    : `${isLocalHost ? "http" : "https"}://${host}`;
 
   const apiUrl = new URL(normalizedHost).href;
 
-  console.log("RideFlow API URL:", apiUrl);
+  console.log("U-GO API URL:", apiUrl);
 
   return apiUrl;
 }
