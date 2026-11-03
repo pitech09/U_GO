@@ -671,9 +671,7 @@ export default function RiderScreen() {
               <FareRow label="Base fare" value={`M${fareEstimate.baseFare.toFixed(2)}`} />
               <FareRow label={`Distance (${fareEstimate.distance} KM)`} value={`M${fareEstimate.distanceFare.toFixed(2)}`} />
               <FareRow label={`Time (~${fareEstimate.duration} min)`} value={`M${fareEstimate.timeFare.toFixed(2)}`} />
-              <View style={styles.fareDivider} />
-              <FareRow label="Driver earns" value={`M${fareEstimate.driverEarnings.toFixed(2)}`} highlight />
-            </View>
+              </View>
           </View>
 
           <View style={styles.btnRow}>
