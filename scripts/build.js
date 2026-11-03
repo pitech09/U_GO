@@ -454,6 +454,30 @@ function updateBundleUrls(timestamp, baseUrl) {
   console.log("Updated bundle URLs");
 }
 
+function toPublicAssetUrl(configuredPath, baseUrl) {
+  if (typeof configuredPath !== "string" || !configuredPath) {
+    return null;
+  }
+
+  const normalizedPath = configuredPath
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "");
+
+  const relativePath = normalizedPath.startsWith("assets/")
+    ? normalizedPath.slice("assets/".length)
+    : normalizedPath;
+
+  if (
+    !relativePath ||
+    relativePath.split("/").includes("..") ||
+    relativePath.startsWith("/")
+  ) {
+    throw new Error(`Invalid configured asset path: ${configuredPath}`);
+  }
+
+  return `${baseUrl}/assets/${relativePath}`;
+}
+
 function updateManifests(manifests, timestamp, baseUrl, assetsByHash) {
   const updateForPlatform = (platform, manifest) => {
     if (!manifest.launchAsset || !manifest.extra) {
@@ -470,6 +494,40 @@ function updateManifests(manifests, timestamp, baseUrl, assetsByHash) {
     manifest.extra.expoGo.debuggerHost =
       baseUrl.replace("https://", "") + "/" + platform;
     manifest.extra.expoGo.packagerOpts.dev = false;
+
+    // Expo config image URLs must point to the deployed assets directory,
+    // not the temporary local Metro server.
+    const expoClient = manifest.extra.expoClient;
+
+    if (expoClient) {
+      if (expoClient.icon) {
+        expoClient.iconUrl = toPublicAssetUrl(expoClient.icon, baseUrl);
+      }
+
+      if (expoClient.splash?.image) {
+        expoClient.splash.imageUrl = toPublicAssetUrl(
+          expoClient.splash.image,
+          baseUrl,
+        );
+      }
+
+      const adaptiveIcon = expoClient.android?.adaptiveIcon;
+
+      if (adaptiveIcon) {
+        for (const key of [
+          "foregroundImage",
+          "backgroundImage",
+          "monochromeImage",
+        ]) {
+          if (adaptiveIcon[key]) {
+            adaptiveIcon[`${key}Url`] = toPublicAssetUrl(
+              adaptiveIcon[key],
+              baseUrl,
+            );
+          }
+        }
+      }
+    }
 
     if (manifest.assets && manifest.assets.length > 0) {
       manifest.assets.forEach((asset) => {

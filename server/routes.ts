@@ -20,7 +20,76 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * c;
 }
 
+let nominatimQueue: Promise<void> = Promise.resolve();
+let lastNominatimRequestAt = 0;
+
+async function searchNominatim(query: string): Promise<any[]> {
+  const request = nominatimQueue.then(async () => {
+    const wait = Math.max(
+      0,
+      1100 - (Date.now() - lastNominatimRequestAt),
+    );
+
+    if (wait > 0) {
+      await new Promise(resolve => setTimeout(resolve, wait));
+    }
+
+    lastNominatimRequestAt = Date.now();
+
+    const url = new URL("https://nominatim.openstreetmap.org/search");
+    url.searchParams.set("format", "json");
+    url.searchParams.set("q", query);
+    url.searchParams.set("limit", "5");
+    url.searchParams.set("addressdetails", "0");
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        "User-Agent": "U-GO-Lesotho/1.0 (https://u-go.onrender.com)",
+        "Accept": "application/json",
+        "Accept-Language": "en",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Nominatim returned HTTP ${response.status}`);
+    }
+
+    return response.json() as Promise<any[]>;
+  });
+
+  nominatimQueue = request.then(
+    () => undefined,
+    () => undefined,
+  );
+
+  return request;
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
+
+  app.get("/api/geocode/search", async (req: Request, res: Response) => {
+    const query = typeof req.query.q === "string"
+      ? req.query.q.trim()
+      : "";
+
+    if (query.length < 3) {
+      return res.status(400).json({ message: "Enter at least 3 characters." });
+    }
+
+    if (query.length > 200) {
+      return res.status(400).json({ message: "Search query is too long." });
+    }
+
+    try {
+      const results = await searchNominatim(query);
+      return res.json(results);
+    } catch (error) {
+      console.error("Destination geocoding failed:", error);
+      return res.status(502).json({
+        message: "Destination search is temporarily unavailable. Please try again.",
+      });
+    }
+  });
 
   app.post("/api/auth/register", async (req: Request, res: Response) => {
     try {

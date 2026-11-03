@@ -2,7 +2,7 @@
   "name": "rideflow",
   "main": "expo-router/entry",
   "version": "1.0.0",
-  "description": "RideFlow — an open-source ride-sharing platform with transparent 82% driver compensation, real GPS, and real maps.",
+  "description": "U-GO Lesotho - A ride-hailing platform for shared and private rides.",
   "license": "GPL-3.0-or-later",
   "scripts": {
     "postinstall": "patch-package",

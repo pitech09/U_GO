@@ -56,7 +56,6 @@ export default function RiderScreen() {
   const [addressSearching, setAddressSearching] = useState(false);
   const [addressSuggestions, setAddressSuggestions] = useState<Array<{ display_name: string; lat: string; lon: string }>>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const autocompleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [reviewRating, setReviewRating] = useState(0);
   const [reviewComment, setReviewComment] = useState('');
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
@@ -251,34 +250,11 @@ export default function RiderScreen() {
     }
   };
 
-  const fetchSuggestions = useCallback(async (text: string) => {
-    if (text.trim().length < 3) {
-      setAddressSuggestions([]);
-      setShowSuggestions(false);
-      return;
-    }
-    try {
-      const query = encodeURIComponent(text.trim());
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=5&addressdetails=0`);
-      const data = await res.json();
-      if (data.length > 0) {
-        setAddressSuggestions(data);
-        setShowSuggestions(true);
-      } else {
-        setAddressSuggestions([]);
-        setShowSuggestions(false);
-      }
-    } catch {
-      setAddressSuggestions([]);
-      setShowSuggestions(false);
-    }
-  }, []);
-
   const handleAddressInputChange = useCallback((text: string) => {
     setAddressInput(text);
-    if (autocompleteTimer.current) clearTimeout(autocompleteTimer.current);
-    autocompleteTimer.current = setTimeout(() => fetchSuggestions(text), 400);
-  }, [fetchSuggestions]);
+    setAddressSuggestions([]);
+    setShowSuggestions(false);
+  }, []);
 
   const selectSuggestion = useCallback((suggestion: { display_name: string; lat: string; lon: string }) => {
     const lat = parseFloat(suggestion.lat);
@@ -303,34 +279,36 @@ export default function RiderScreen() {
   }, []);
 
   const searchAddress = async () => {
-    if (!addressInput.trim()) return;
+    const searchText = addressInput.trim();
+    if (searchText.length < 3) {
+      showAlert("Search", "Enter at least 3 characters.");
+      return;
+    }
+
     setAddressSearching(true);
     setShowSuggestions(false);
-    try {
-      const query = encodeURIComponent(addressInput.trim());
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=1`);
-      const data = await res.json();
-      if (data.length > 0) {
-        const result = data[0];
-        const lat = parseFloat(result.lat);
-        const lng = parseFloat(result.lon);
-        setDropoffCoord({ lat, lng });
-        const parts = result.display_name.split(',');
-        setDropoffAddress(parts.slice(0, 3).join(',').trim());
+    setAddressSuggestions([]);
 
-        if (mapRef.current) {
-          (mapRef.current as any).animateToRegion?.({
-            latitude: lat,
-            longitude: lng,
-            latitudeDelta: LATITUDE_DELTA,
-            longitudeDelta: LONGITUDE_DELTA,
-          }, 500);
-        }
-      } else {
-        showAlert('Not Found', 'Address not found. Try a different search.');
+    try {
+      const route = `/api/geocode/search?q=${encodeURIComponent(searchText)}`;
+      const response = await apiRequest("GET", route);
+      const results = await response.json();
+
+      if (!Array.isArray(results) || results.length === 0) {
+        showAlert("Not Found", "Address not found. Try a different search.");
+        return;
       }
-    } catch {
-      showAlert('Error', 'Search failed. Please try again.');
+
+      setAddressSuggestions(results);
+      setShowSuggestions(true);
+    } catch (error) {
+      console.error("U-GO destination search failed:", error);
+      showAlert(
+        "Search Error",
+        error instanceof Error
+          ? error.message
+          : "Destination search failed. Please try again.",
+      );
     } finally {
       setAddressSearching(false);
     }
