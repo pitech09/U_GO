@@ -479,7 +479,7 @@ export default function DriverScreen() {
         {activeRide?.fare && (
           <View style={styles.earningChip}>
             <Ionicons name="cash" size={16} color={Colors.primary} />
-            <Text style={styles.earningChipText}>${activeRide.fare.driverEarnings.toFixed(2)}</Text>
+            <Text style={styles.earningChipText}>M{activeRide.fare.driverEarnings.toFixed(2)}</Text>
           </View>
         )}
       </View>
