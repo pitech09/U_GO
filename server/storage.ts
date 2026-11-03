@@ -25,13 +25,21 @@ export interface IStorage {
   markEventRead(eventId: string): Promise<void>;
 
   getConfig(): Promise<PlatformConfig>;
+  calculateFareForDistance(distanceKm: number): Promise<{
+    baseFare: number;
+    distanceFare: number;
+    timeFare: number;
+    totalFare: number;
+    driverEarnings: number;
+    platformFee: number;
+  }>;
   updateConfig(updates: Partial<PlatformConfig>): Promise<PlatformConfig>;
 
   initialize(): Promise<void>;
 }
 
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 3959;
+  const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
@@ -42,11 +50,11 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
 }
 
 const DEFAULT_CONFIG: PlatformConfig = {
-  baseFare: 2.50,
-  perMile: 1.75,
+  baseFare: 20,
+  perKm: 12,
   perMinute: 0.35,
-  driverSharePercent: 82,
-  minimumFare: 5.00,
+  driverSharePercent: 88,
+  minimumFare: 20,
   surgePricing: false,
   surgeMultiplier: 1.0,
 };
@@ -160,10 +168,33 @@ export class RedisStorage implements IStorage {
   private async getConfigInternal(): Promise<PlatformConfig> {
     const data = await this.redis.get('rideflow:config');
     if (!data) return { ...DEFAULT_CONFIG };
-    return JSON.parse(data);
+
+    const parsed = JSON.parse(data) as Partial<PlatformConfig> & { perMile?: number };
+    const { perMile, ...rest } = parsed;
+
+    // One-time migration from the previous per-mile fare configuration.
+    if (typeof perMile === 'number') {
+      const migrated: PlatformConfig = {
+        ...DEFAULT_CONFIG,
+        ...rest,
+        baseFare: 20,
+        perKm: 12,
+        perMinute: 0.35,
+        driverSharePercent: 88,
+        minimumFare: 20,
+      };
+      await this.redis.set('rideflow:config', JSON.stringify(migrated));
+      return migrated;
+    }
+
+    return {
+      ...DEFAULT_CONFIG,
+      ...rest,
+      perKm: typeof parsed.perKm === 'number' ? parsed.perKm : DEFAULT_CONFIG.perKm,
+    };
   }
 
-  private async calculateFare(distanceMiles: number): Promise<{
+  private async calculateFare(distanceKm: number): Promise<{
     baseFare: number;
     distanceFare: number;
     timeFare: number;
@@ -172,9 +203,10 @@ export class RedisStorage implements IStorage {
     platformFee: number;
   }> {
     const config = await this.getConfigInternal();
-    const { baseFare, perMile, perMinute, driverSharePercent, minimumFare, surgePricing, surgeMultiplier } = config;
-    const estimatedMinutes = distanceMiles * 3;
-    const distanceFare = distanceMiles * perMile;
+    const { baseFare, perKm, perMinute, driverSharePercent, minimumFare, surgePricing, surgeMultiplier } = config;
+    // Retain the existing estimate of 3 minutes per mile.
+    const estimatedMinutes = distanceKm * (3 / 1.609344);
+    const distanceFare = distanceKm * perKm;
     const timeFare = estimatedMinutes * perMinute;
     let totalFare = Math.max(baseFare + distanceFare + timeFare, minimumFare);
     if (surgePricing) totalFare *= surgeMultiplier;
@@ -189,6 +221,10 @@ export class RedisStorage implements IStorage {
     };
   }
 
+  async calculateFareForDistance(distanceKm: number) {
+    return this.calculateFare(distanceKm);
+  }
+
   async createRide(ride: Omit<Ride, 'id' | 'createdAt'>): Promise<Ride> {
     const id = randomUUID();
     const distance = calculateDistance(
@@ -201,7 +237,7 @@ export class RedisStorage implements IStorage {
       id,
       createdAt: new Date().toISOString(),
       distance: Math.round(distance * 10) / 10,
-      duration: Math.round(distance * 3),
+      duration: Math.round(distance * (3 / 1.609344)),
       fare,
     };
     await this.redis.hset('rideflow:rides', id, JSON.stringify(newRide));

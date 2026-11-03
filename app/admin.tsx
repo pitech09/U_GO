@@ -142,10 +142,14 @@ export default function AdminScreen() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
       });
-      if (res.ok) {
-        setConfig(await res.json());
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || `Save failed (HTTP ${res.status})`);
       }
-    } catch {}
+      setConfig(await res.json());
+    } catch (error) {
+      throw error instanceof Error ? error : new Error('Could not save fare settings.');
+    }
   };
 
   const statusColor = (status: string) => {
@@ -229,7 +233,7 @@ export default function AdminScreen() {
 }
 
 function OverviewTab({ stats, config }: { stats: Stats; config: PlatformConfig | null }) {
-  const driverShare = config?.driverSharePercent ?? 82;
+  const driverShare = config?.driverSharePercent ?? 88;
   return (
     <>
       <View style={styles.revenueCard}>
@@ -380,7 +384,7 @@ function RideCard({ ride, statusColor, cancelRide, actionLoading, canCancel }: {
             <Text style={styles.reviewBoxDate}>{new Date(ride.review.createdAt).toLocaleDateString()}</Text>
           </View>
           {ride.review.comment && (
-            <Text style={styles.reviewBoxComment}>"{ride.review.comment}"</Text>
+            <Text style={styles.reviewBoxComment}>&quot;{ride.review.comment}&quot;</Text>
           )}
         </View>
       )}
@@ -481,9 +485,9 @@ function UserCard({ user: u, suspendUser, deleteUser, actionLoading }: {
   );
 }
 
-function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateConfig: (u: Partial<PlatformConfig>) => void }) {
+function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateConfig: (u: Partial<PlatformConfig>) => Promise<void> }) {
   const [baseFare, setBaseFare] = useState(config.baseFare.toString());
-  const [perMile, setPerMile] = useState(config.perMile.toString());
+  const [perKm, setPerKm] = useState(config.perKm.toString());
   const [perMinute, setPerMinute] = useState(config.perMinute.toString());
   const [driverShare, setDriverShare] = useState(config.driverSharePercent.toString());
   const [minFare, setMinFare] = useState(config.minimumFare.toString());
@@ -491,10 +495,11 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
   const [surgeMultiplier, setSurgeMultiplier] = useState(config.surgeMultiplier.toString());
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   useEffect(() => {
     setBaseFare(config.baseFare.toString());
-    setPerMile(config.perMile.toString());
+    setPerKm(config.perKm.toString());
     setPerMinute(config.perMinute.toString());
     setDriverShare(config.driverSharePercent.toString());
     setMinFare(config.minimumFare.toString());
@@ -506,17 +511,21 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
     setSaving(true);
     try {
       await updateConfig({
-        baseFare: parseFloat(baseFare) || 2.50,
-        perMile: parseFloat(perMile) || 1.75,
+        baseFare: parseFloat(baseFare) || 20,
+        perKm: parseFloat(perKm) || 12,
         perMinute: parseFloat(perMinute) || 0.35,
-        driverSharePercent: Math.min(100, Math.max(0, parseInt(driverShare) || 82)),
-        minimumFare: parseFloat(minFare) || 5.00,
+        driverSharePercent: Math.min(100, Math.max(0, parseInt(driverShare) || 88)),
+        minimumFare: parseFloat(minFare) || 20,
         surgePricing: surge,
         surgeMultiplier: parseFloat(surgeMultiplier) || 1.0,
         ...overrides,
       });
       setSaved(true);
+      setSaveError('');
       setTimeout(() => setSaved(false), 2000);
+    } catch (error) {
+      setSaved(false);
+      setSaveError(error instanceof Error ? error.message : 'Could not save fare settings.');
     } finally {
       setSaving(false);
     }
@@ -538,7 +547,7 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
       <Text style={styles.sectionTitle}>Fare Configuration</Text>
       <View style={styles.settingsCard}>
         <ConfigRow label="Base Fare (LSL)" value={baseFare} onChange={setBaseFare} />
-        <ConfigRow label="Per KM (LSL)" value={perMile} onChange={setPerMile} />
+        <ConfigRow label="Per KM (LSL)" value={perKm} onChange={setPerKm} />
         <ConfigRow label="Per Minute (LSL)" value={perMinute} onChange={setPerMinute} />
         <ConfigRow label="Driver Share (%)" value={driverShare} onChange={setDriverShare} />
         <ConfigRow label="Minimum Fare (LSL)" value={minFare} onChange={setMinFare} />
@@ -560,6 +569,9 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
         )}
       </View>
 
+      {saveError ? (
+        <Text style={{ color: Colors.error, marginTop: 10 }}>{saveError}</Text>
+      ) : null}
       <Pressable style={[styles.saveBtn, saved && styles.saveBtnSaved, saving && { opacity: 0.6 }]} onPress={() => saveConfig()} disabled={saving}>
         <Ionicons name={saved ? 'checkmark-circle' : 'save'} size={20} color={Colors.textWhite} />
         <Text style={styles.saveBtnText}>{saved ? 'Saved' : 'Save Changes'}</Text>

@@ -442,6 +442,8 @@ const WebMapView = forwardRef<any, MapViewProps>((props, ref) => {
   );
 });
 
+WebMapView.displayName = 'WebMapView';
+
 const webStyles = StyleSheet.create({
   container: {
     flex: 1,

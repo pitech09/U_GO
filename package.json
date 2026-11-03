@@ -14,7 +14,8 @@
     "db:push": "drizzle-kit push",
     "start": "expo start",
     "lint": "expo lint",
-    "lint:fix": "expo lint --fix"
+    "lint:fix": "expo lint --fix",
+    "expo:start:static:build": "expo start --no-dev --minify --localhost --port 8081"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
