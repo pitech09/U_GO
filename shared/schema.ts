@@ -39,6 +39,7 @@ export interface PlatformConfig {
   surgePricing: boolean;
   surgeMultiplier: number;
   sharedRideDiscountPercent: number;
+  groupDiscountPercent: number;
   passengerPricingMode: PassengerPricingMode;
   additionalPassengerFee: number;
   additionalPassengerMultiplier: number;
@@ -75,6 +76,7 @@ export interface Ride {
     passengerFare?: number;
     sharedDiscount?: number;
     sharedRideDiscountPercent?: number;
+    groupDiscountPercent?: number;
     totalFare: number;
     driverEarnings: number;
     platformFee: number;

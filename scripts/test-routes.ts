@@ -23,6 +23,7 @@ const config: PlatformConfig = {
   surgePricing: false,
   surgeMultiplier: 1,
   sharedRideDiscountPercent: 15,
+  groupDiscountPercent: 20,
   passengerPricingMode: "fixed",
   additionalPassengerFee: 0,
   additionalPassengerMultiplier: 1,
@@ -280,7 +281,7 @@ test("Private fare estimate uses the private fare calculation", async () => {
   assert.equal(result.sharedRideDiscountPercent, 0);
 });
 
-test("Shared fare estimate applies the configured discount", async () => {
+test("Solo Shared fare estimate does not apply a group discount", async () => {
   const response = await fetch(estimateUrl("shared"));
   assert.equal(response.status, 200);
 
@@ -288,6 +289,7 @@ test("Shared fare estimate applies the configured discount", async () => {
     totalFare: number;
     sharedDiscount: number;
     sharedRideDiscountPercent: number;
+    groupDiscountPercent: number;
   };
 
   const distance = calculateDistance(
@@ -300,9 +302,9 @@ test("Shared fare estimate applies the configured discount", async () => {
   const expected = calculateFareBreakdown(distance, config, 0, "shared");
 
   assert.equal(result.totalFare, expected.totalFare);
-  assert.equal(result.sharedDiscount, expected.sharedDiscount);
-  assert.equal(result.sharedRideDiscountPercent, 15);
-  assert.ok(result.sharedDiscount > 0);
+  assert.equal(result.sharedDiscount, 0);
+  assert.equal(result.sharedRideDiscountPercent, 0);
+  assert.equal(result.groupDiscountPercent, 0);
 });
 
 test("Shared estimate forwards additional passenger count", async () => {
@@ -352,7 +354,8 @@ test("Shared booking preserves ride type and passenger count", async () => {
   assert.equal(ride.rideType, "shared");
   assert.equal(ride.additionalPassengers, 2);
   assert.equal(ride.passengerCount, 3);
-  assert.equal(ride.fare?.sharedRideDiscountPercent, 15);
+  assert.equal(ride.fare?.sharedRideDiscountPercent, 0);
+  assert.equal(ride.fare?.groupDiscountPercent, 20);
   assert.ok((ride.fare?.sharedDiscount ?? 0) > 0);
 
   const captured = bookingInputs.at(-1);

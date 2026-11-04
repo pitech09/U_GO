@@ -7,6 +7,7 @@ export interface FareBreakdown {
   passengerFare: number;
   sharedDiscount: number;
   sharedRideDiscountPercent: number;
+  groupDiscountPercent: number;
   totalFare: number;
   driverEarnings: number;
   platformFee: number;
@@ -20,8 +21,7 @@ export function calculateFareBreakdown(
 ): FareBreakdown {
   const {
     baseFare, perKm, perMinute, driverSharePercent, minimumFare,
-    surgePricing, surgeMultiplier, sharedRideDiscountPercent,
-    passengerPricingMode, additionalPassengerFee, additionalPassengerMultiplier,
+    surgePricing, surgeMultiplier, groupDiscountPercent,
   } = config;
 
   const estimatedMinutes = distanceKm * (3 / 1.609344);
@@ -29,34 +29,21 @@ export function calculateFareBreakdown(
   const timeFare = estimatedMinutes * perMinute;
   const tripSubtotal = Math.max(baseFare + distanceFare + timeFare, minimumFare);
 
-  let passengerFare = 0;
-  let totalFare = tripSubtotal;
+  const passengerCount = 1 + Math.max(0, Math.min(7, Math.floor(additionalPassengers)));
+  const groupSubtotal = tripSubtotal * passengerCount;
+  const discountPercent = Number.isFinite(groupDiscountPercent)
+    ? Math.max(0, Math.min(90, groupDiscountPercent))
+    : 20;
 
-  if (additionalPassengers > 0) {
-    if (passengerPricingMode === "multiplier") {
-      const factor = 1 + ((additionalPassengerMultiplier - 1) * additionalPassengers);
-      totalFare = tripSubtotal * factor;
-      passengerFare = totalFare - tripSubtotal;
-    } else {
-      passengerFare = additionalPassengerFee * additionalPassengers;
-      totalFare += passengerFare;
-    }
-  }
-
-  const discountPercent = Number.isFinite(sharedRideDiscountPercent)
-    ? Math.max(0, Math.min(90, sharedRideDiscountPercent))
-    : 15;
-
-  const appliedDiscountPercent = rideType === "shared" ? discountPercent : 0;
-
-  const sharedDiscount = rideType === "shared"
-    ? totalFare - Math.max(minimumFare, totalFare * (1 - discountPercent / 100))
+  const appliedDiscountPercent = passengerCount > 1 ? discountPercent : 0;
+  const sharedDiscount = passengerCount > 1
+    ? groupSubtotal - Math.max(minimumFare, groupSubtotal * (1 - discountPercent / 100))
     : 0;
 
-  totalFare -= sharedDiscount;
-
+  let totalFare = groupSubtotal - sharedDiscount;
   if (surgePricing) totalFare *= surgeMultiplier;
 
+  const passengerFare = tripSubtotal * (passengerCount - 1);
   const driverPercent = driverSharePercent / 100;
 
   return {
@@ -65,7 +52,8 @@ export function calculateFareBreakdown(
     timeFare: Math.round(timeFare * 100) / 100,
     passengerFare: Math.round(passengerFare * 100) / 100,
     sharedDiscount: Math.round(sharedDiscount * 100) / 100,
-    sharedRideDiscountPercent: appliedDiscountPercent,
+    sharedRideDiscountPercent: 0,
+    groupDiscountPercent: appliedDiscountPercent,
     totalFare: Math.round(totalFare * 100) / 100,
     driverEarnings: Math.round(totalFare * driverPercent * 100) / 100,
     platformFee: Math.round(totalFare * (1 - driverPercent) * 100) / 100,

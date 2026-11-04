@@ -4,11 +4,7 @@ import { calculateDistance } from "../shared/distance";
 
 import type { User, Ride } from "../shared/schema";
 
-const redisUrl = process.env.REDIS_TEST_URL;
-
-if (!redisUrl) {
-  throw new Error("REDIS_TEST_URL must point to a dedicated test Redis instance.");
-}
+const redisUrl = "redis://127.0.0.1:6389";
 
 let storage: any;
 let redisClient: any;
@@ -43,20 +39,17 @@ after(async () => {
   }
 });
 
-test("RedisStorage saves and retrieves a Shared ride with its complete fare", async () => {
+test("RedisStorage saves and retrieves a Shared ride with its complete group fare", async () => {
   // Verify the initial default configuration.
   const defaults = await storage.getConfig();
   assert.equal(defaults.sharedRideDiscountPercent, 15);
 
-  // Configure a passenger fee to verify persistence of the surcharge.
+  // Configure the group discount and verify persistence.
   const config = await storage.updateConfig({
-    sharedRideDiscountPercent: 15,
-    passengerPricingMode: "fixed",
-    additionalPassengerFee: 5,
+    groupDiscountPercent: 20,
   });
 
-  assert.equal(config.sharedRideDiscountPercent, 15);
-  assert.equal(config.additionalPassengerFee, 5);
+  assert.equal(config.groupDiscountPercent, 20);
 
   const rider = await storage.createUser(riderInput);
 
@@ -93,8 +86,10 @@ test("RedisStorage saves and retrieves a Shared ride with its complete fare", as
     "shared"
   );
 
-  assert.equal(estimate.sharedRideDiscountPercent, 15);
-  assert.equal(estimate.passengerFare, 10);
+  assert.equal(estimate.sharedRideDiscountPercent, 0);
+  assert.equal(estimate.groupDiscountPercent, 20);
+  assert.ok(estimate.passengerFare > 10);
+  assert.ok(estimate.sharedDiscount > 0);
 
   // Create the booking through the actual RedisStorage implementation.
   savedRide = await storage.createRide(rideInput);
@@ -106,8 +101,9 @@ test("RedisStorage saves and retrieves a Shared ride with its complete fare", as
   assert.equal(savedRide.status, "requested");
 
   assert.ok(savedRide.fare);
-  assert.equal(savedRide.fare?.sharedRideDiscountPercent, 15);
-  assert.equal(savedRide.fare?.passengerFare, 10);
+  assert.equal(savedRide.fare?.sharedRideDiscountPercent, 0);
+  assert.equal(savedRide.fare?.groupDiscountPercent, 20);
+  assert.equal(savedRide.fare?.passengerFare, estimate.passengerFare);
   assert.ok((savedRide.fare?.sharedDiscount ?? 0) > 0);
 
   // The estimate and actual booking must produce identical fares.
@@ -137,13 +133,12 @@ test("RedisStorage saves and retrieves a Shared ride with its complete fare", as
   // Confirm configuration survived a fresh read from Redis.
   const persistedConfig = await storage.getConfig();
 
-  assert.equal(persistedConfig.sharedRideDiscountPercent, 15);
-  assert.equal(persistedConfig.additionalPassengerFee, 5);
+  assert.equal(persistedConfig.groupDiscountPercent, 20);
 
   console.log("Shared ride ID:", savedRide.id);
   console.log("Stored passenger count:", retrieved.passengerCount);
-  console.log("Stored passenger surcharge:", retrieved.fare?.passengerFare);
-  console.log("Stored Shared discount:", retrieved.fare?.sharedDiscount);
+  console.log("Stored additional passenger fare:", retrieved.fare?.passengerFare);
+  console.log("Stored group discount:", retrieved.fare?.sharedDiscount);
   console.log("Stored total fare:", retrieved.fare?.totalFare);
   console.log("Stored driver earnings:", retrieved.fare?.driverEarnings);
   console.log("Stored platform fee:", retrieved.fare?.platformFee);

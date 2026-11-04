@@ -72,6 +72,7 @@ export interface IStorage {
     passengerFare: number;
     sharedDiscount: number;
     sharedRideDiscountPercent: number;
+    groupDiscountPercent: number;
     totalFare: number;
     driverEarnings: number;
     platformFee: number;
@@ -91,6 +92,7 @@ const DEFAULT_CONFIG: PlatformConfig = {
   surgePricing: false,
   surgeMultiplier: 1.0,
   sharedRideDiscountPercent: 15,
+  groupDiscountPercent: 20,
   passengerPricingMode: 'fixed',
   additionalPassengerFee: 0,
   additionalPassengerMultiplier: 1.0,
@@ -907,6 +909,11 @@ export class RedisStorage implements IStorage {
   async updateConfig(updates: Partial<PlatformConfig>): Promise<PlatformConfig> {
     const current = await this.getConfigInternal();
     const updated = { ...current, ...updates };
+    const groupDiscount = Number(updated.groupDiscountPercent);
+    updated.groupDiscountPercent = Number.isFinite(groupDiscount)
+      ? Math.max(0, Math.min(90, groupDiscount))
+      : 20;
+
     const discount = Number(updated.sharedRideDiscountPercent);
     updated.sharedRideDiscountPercent = Number.isFinite(discount)
       ? Math.max(0, Math.min(90, discount))

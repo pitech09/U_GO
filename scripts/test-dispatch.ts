@@ -26,6 +26,7 @@ const config: PlatformConfig = {
   surgePricing: false,
   surgeMultiplier: 1,
   sharedRideDiscountPercent: 15,
+  groupDiscountPercent: 20,
   passengerPricingMode: "fixed",
   additionalPassengerFee: 0,
   additionalPassengerMultiplier: 1,
