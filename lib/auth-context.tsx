@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { apiRequest } from '@/lib/query-client';
+import { apiRequest, queryClient } from '@/lib/query-client';
 import type { User, UserRole } from '@shared/schema';
 
 type SafeUser = Omit<User, 'password'>;
@@ -95,8 +95,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
-    await AsyncStorage.removeItem('rideflow_user');
     setUser(null);
+    await queryClient.cancelQueries();
+    queryClient.clear();
+    await AsyncStorage.removeItem('rideflow_user');
   };
 
   const refreshUser = async () => {

@@ -435,7 +435,7 @@ export default function DriverScreen() {
                     actions.push({ label: 'Admin Panel', icon: 'settings', iconColor: Colors.accent, onPress: () => router.replace('/admin') });
                   }
                   actions.push({ label: 'Switch to Rider', icon: 'person', onPress: () => router.replace('/rider') });
-                  actions.push({ label: 'Log Out', icon: 'log-out-outline', destructive: true, onPress: () => { logout(); router.replace('/'); } });
+                  actions.push({ label: 'Log Out', icon: 'log-out-outline', destructive: true, onPress: async () => { await logout(); router.replace('/'); } });
                   showActionSheet('Account', actions);
                 }}
               >

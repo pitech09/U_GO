@@ -521,7 +521,7 @@ export default function RiderScreen() {
       menuActions.push({ label: 'Admin Panel', icon: 'settings', iconColor: Colors.accent, onPress: () => router.replace('/admin') });
       menuActions.push({ label: 'Switch to Driver', icon: 'car', onPress: () => router.replace('/driver') });
     }
-    menuActions.push({ label: 'Log Out', icon: 'log-out-outline', destructive: true, onPress: () => { logout(); router.replace('/'); } });
+    menuActions.push({ label: 'Log Out', icon: 'log-out-outline', destructive: true, onPress: async () => { await logout(); router.replace('/'); } });
     showActionSheet('Menu', menuActions);
   };
 

@@ -187,7 +187,7 @@ export default function AdminScreen() {
           </Pressable>
           <Pressable
             style={styles.logoutBtn}
-            onPress={() => { logout(); router.replace('/'); }}
+            onPress={async () => { await logout(); router.replace('/'); }}
           >
             <Ionicons name="log-out-outline" size={20} color={Colors.error} />
           </Pressable>
