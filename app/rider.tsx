@@ -853,9 +853,9 @@ export default function RiderScreen() {
                   value={`M${(fareEstimate.passengerFare || 0).toFixed(2)}`}
                 />
               )}
-              {rideType === 'shared' && (fareEstimate.sharedDiscount || 0) > 0 && (
+              {additionalPassengers > 0 && (fareEstimate.sharedDiscount || 0) > 0 && (
                 <FareRow
-                  label={`Shared discount (${fareEstimate.sharedRideDiscountPercent}%)`}
+                  label={`Group discount (${fareEstimate.groupDiscountPercent}%)`}
                   value={`-M${fareEstimate.sharedDiscount.toFixed(2)}`}
                 />
               )}

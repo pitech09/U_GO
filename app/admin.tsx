@@ -491,6 +491,7 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
   const [perMinute, setPerMinute] = useState(config.perMinute.toString());
   const [driverShare, setDriverShare] = useState(config.driverSharePercent.toString());
   const [minFare, setMinFare] = useState(config.minimumFare.toString());
+  const [groupDiscount, setGroupDiscount] = useState(config.groupDiscountPercent.toString());
   const [surge, setSurge] = useState(config.surgePricing);
   const [surgeMultiplier, setSurgeMultiplier] = useState(config.surgeMultiplier.toString());
   const [dispatchInitialRadius, setDispatchInitialRadius] = useState(config.dispatchInitialRadiusKm.toString());
@@ -507,6 +508,7 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
     setPerMinute(config.perMinute.toString());
     setDriverShare(config.driverSharePercent.toString());
     setMinFare(config.minimumFare.toString());
+    setGroupDiscount(config.groupDiscountPercent.toString());
     setSurge(config.surgePricing);
     setSurgeMultiplier(config.surgeMultiplier.toString());
     setDispatchInitialRadius(config.dispatchInitialRadiusKm.toString());
@@ -524,6 +526,7 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
         perMinute: parseFloat(perMinute) || 0.35,
         driverSharePercent: Math.min(100, Math.max(0, parseInt(driverShare) || 88)),
         minimumFare: parseFloat(minFare) || 20,
+        groupDiscountPercent: Math.min(90, Math.max(0, Number(groupDiscount) || 0)),
         surgePricing: surge,
         surgeMultiplier: parseFloat(surgeMultiplier) || 1.0,
         dispatchInitialRadiusKm: Number(dispatchInitialRadius),
@@ -563,6 +566,7 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
         <ConfigRow label="Per Minute (LSL)" value={perMinute} onChange={setPerMinute} />
         <ConfigRow label="Driver Share (%)" value={driverShare} onChange={setDriverShare} />
         <ConfigRow label="Minimum Fare (LSL)" value={minFare} onChange={setMinFare} />
+        <ConfigRow label="Group Discount (%)" value={groupDiscount} onChange={setGroupDiscount} />
       </View>
 
       <Text style={[styles.sectionTitle, { marginTop: 20 }]}>Surge Pricing</Text>
