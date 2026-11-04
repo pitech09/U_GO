@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, Pressable, StyleSheet, Platform,
-  ActivityIndicator, Dimensions, ScrollView, Linking,
+  ActivityIndicator, Dimensions, ScrollView, Linking, TextInput,
 } from 'react-native';
 import { router } from 'expo-router';
 import MapView, {
@@ -26,6 +26,7 @@ const LATITUDE_DELTA = 0.015;
 const LONGITUDE_DELTA = LATITUDE_DELTA * (width / Dimensions.get('window').height);
 
 type DriverPhase = 'dashboard' | 'online' | 'ride_request' | 'navigating' | 'arrived' | 'in_ride';
+type DriverRideOffer = Ride & { offerExpiresAt: number };
 
 export default function DriverScreen() {
   const insets = useSafeAreaInsets();
@@ -38,11 +39,22 @@ export default function DriverScreen() {
   const [permissionStatus, setPermissionStatus] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState(user?.isOnline || false);
   const [phase, setPhase] = useState<DriverPhase>('dashboard');
-  const [pendingRides, setPendingRides] = useState<Ride[]>([]);
+  const [pendingRides, setPendingRides] = useState<DriverRideOffer[]>([]);
+  const [currentTime, setCurrentTime] = useState(Date.now());
   const [activeRide, setActiveRide] = useState<Ride | null>(null);
   const [earnings, setEarnings] = useState({ today: 0, total: user?.totalEarnings || 0, rides: user?.totalRides || 0 });
   const [rideHistory, setRideHistory] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(false);
+  const [vehicleEditorOpen, setVehicleEditorOpen] = useState(false);
+  const [savingVehicle, setSavingVehicle] = useState(false);
+  const [vehicleForm, setVehicleForm] = useState({
+    make: '',
+    model: '',
+    year: '',
+    color: '',
+    plate: '',
+    seatingCapacity: '',
+  });
   const { showAlert, showActionSheet, modalProps } = useAppModal();
 
   const topInset = Platform.OS === 'web' ? 67 : insets.top;
@@ -71,6 +83,11 @@ export default function DriverScreen() {
 
     return () => clearInterval(interval);
   }, [user?.id, isOnline]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     setEarnings({
@@ -123,9 +140,79 @@ export default function DriverScreen() {
     } catch {}
   };
 
+  const openVehicleEditor = () => {
+    setVehicleForm({
+      make: user?.vehicleInfo?.make || '',
+      model: user?.vehicleInfo?.model || '',
+      year: user?.vehicleInfo?.year || '',
+      color: user?.vehicleInfo?.color || '',
+      plate: user?.vehicleInfo?.plate || '',
+      seatingCapacity: user?.vehicleInfo?.seatingCapacity?.toString() || '',
+    });
+    setVehicleEditorOpen(true);
+  };
+
+  const saveVehicle = async () => {
+    if (!user?.id) return;
+
+    const capacity = Number(vehicleForm.seatingCapacity);
+    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 8) {
+      showAlert(
+        'Invalid capacity',
+        'Enter between 1 and 8 passenger seats, excluding the driver.'
+      );
+      return;
+    }
+
+    const vehicleInfo = {
+      make: vehicleForm.make.trim(),
+      model: vehicleForm.model.trim(),
+      year: vehicleForm.year.trim(),
+      color: vehicleForm.color.trim(),
+      plate: vehicleForm.plate.trim(),
+      seatingCapacity: capacity,
+    };
+
+    if (
+      !vehicleInfo.make ||
+      !vehicleInfo.model ||
+      !vehicleInfo.year ||
+      !vehicleInfo.color ||
+      !vehicleInfo.plate
+    ) {
+      showAlert('Missing details', 'Please complete all vehicle fields.');
+      return;
+    }
+
+    setSavingVehicle(true);
+    try {
+      await apiRequest('PUT', `/api/user/${user.id}/vehicle`, { vehicleInfo });
+      await refreshUser();
+      setVehicleEditorOpen(false);
+      showAlert('Vehicle updated', 'Your vehicle details and passenger capacity have been saved.');
+    } catch (e: any) {
+      showAlert('Could not save vehicle', e?.message || 'Please try again.');
+    } finally {
+      setSavingVehicle(false);
+    }
+  };
+
   const toggleOnline = async () => {
     if (!user?.id) return;
     const newState = !isOnline;
+
+    if (newState) {
+      const capacity = Number(user.vehicleInfo?.seatingCapacity);
+      if (!Number.isInteger(capacity) || capacity < 1 || capacity > 8) {
+        openVehicleEditor();
+        showAlert(
+          'Vehicle details required',
+          'Add or update your vehicle and passenger seating capacity before going online.'
+        );
+        return;
+      }
+    }
+
     try {
       if (newState && location) {
         await apiRequest('PUT', `/api/user/${user.id}/location`, location);
@@ -143,20 +230,27 @@ export default function DriverScreen() {
       }
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     } catch (e: any) {
-      showAlert('Error', 'Could not update status');
+      showAlert('Could not update status', e.message || 'Please try again.');
     }
   };
 
   const fetchPendingRides = async () => {
-    try {
-      const baseUrl = getApiUrl();
-      const url = new URL('/api/rides/available', baseUrl);
-      const res = await fetch(url.toString(), { cache: 'no-store' });
-      const data = await res.json();
-      const rides = Array.isArray(data) ? data : [];
-      setPendingRides(rides);
+    if (!user?.id) return;
 
-      const availableIds = new Set(rides.map((ride: Ride) => ride.id));
+    try {
+      const res = await apiRequest(
+        'GET',
+        `/api/rides/driver/${user.id}/offers`
+      );
+      const data = await res.json();
+      const offers: DriverRideOffer[] = Array.isArray(data) ? data : [];
+      const validOffers = offers.filter(
+        offer => offer.offerExpiresAt > Date.now()
+      );
+
+      setPendingRides(validOffers);
+
+      const availableIds = new Set(validOffers.map(offer => offer.id));
       const hasNewRide = [...availableIds].some(
         rideId => !previousAvailableRideIdsRef.current.has(rideId)
       );
@@ -183,6 +277,11 @@ export default function DriverScreen() {
       const data = await res.json();
       if (data && data.id) {
         setActiveRide(data);
+        setPendingRides([]);
+        alertedRideIdsRef.current.clear();
+        previousAvailableRideIdsRef.current.clear();
+        stopIncomingRideAlert();
+
         if (data.status === 'accepted' || data.status === 'arriving') setPhase('navigating');
         else if (data.status === 'arrived') setPhase('arrived');
         else if (data.status === 'in_progress') setPhase('in_ride');
@@ -218,6 +317,7 @@ export default function DriverScreen() {
 
       const res = await apiRequest('PUT', `/api/rides/${rideId}/accept`, { driverId: user.id });
       const ride = await res.json();
+      setPendingRides([]);
       setActiveRide(ride);
       setPhase('navigating');
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -228,6 +328,23 @@ export default function DriverScreen() {
       showAlert('Error', msg);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const rejectRide = async (rideId: string) => {
+    if (!user?.id) return;
+
+    try {
+      await apiRequest('PUT', `/api/rides/${rideId}/reject`, {
+        driverId: user.id,
+      });
+
+      setPendingRides(previous => previous.filter(ride => ride.id !== rideId));
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await fetchPendingRides();
+    } catch (e: any) {
+      showAlert('Offer unavailable', e.message || 'Could not reject this offer');
+      await fetchPendingRides();
     }
   };
 
@@ -356,19 +473,106 @@ export default function DriverScreen() {
             <Text style={styles.goOnlineBtnText}>Go Online</Text>
           </Pressable>
 
-          {user?.vehicleInfo && (
+          <View style={styles.vehicleSection}>
             <View style={styles.vehicleCard}>
               <Ionicons name="car" size={24} color={Colors.primary} />
               <View style={styles.vehicleInfo}>
                 <Text style={styles.vehicleTitle}>
-                  {user.vehicleInfo.year} {user.vehicleInfo.make} {user.vehicleInfo.model}
+                  {user?.vehicleInfo
+                    ? `${user.vehicleInfo.year} ${user.vehicleInfo.make} ${user.vehicleInfo.model}`
+                    : 'Vehicle details required'}
                 </Text>
                 <Text style={styles.vehicleSub}>
-                  {user.vehicleInfo.color} | {user.vehicleInfo.plate}
+                  {user?.vehicleInfo
+                    ? `${user.vehicleInfo.color} | ${user.vehicleInfo.plate}`
+                    : 'Add your vehicle before going online'}
+                </Text>
+                <Text style={styles.vehicleCapacity}>
+                  Passenger seats: {user?.vehicleInfo?.seatingCapacity || 'Not verified'}
+                  {user?.vehicleInfo?.seatingCapacity ? ' (excluding driver)' : ''}
                 </Text>
               </View>
+              <Pressable onPress={openVehicleEditor} style={styles.editVehicleBtn}>
+                <Ionicons name="create-outline" size={20} color={Colors.primary} />
+                <Text style={styles.editVehicleText}>
+                  {user?.vehicleInfo ? 'Edit' : 'Add'}
+                </Text>
+              </Pressable>
             </View>
-          )}
+
+            {vehicleEditorOpen && (
+              <View style={styles.vehicleEditor}>
+                <Text style={styles.vehicleEditorTitle}>Vehicle information</Text>
+                <Text style={styles.vehicleEditorNote}>
+                  Passenger capacity excludes the driver. Enter the number of passenger seats.
+                </Text>
+
+                <TextInput
+                  style={styles.vehicleInput}
+                  placeholder="Vehicle make"
+                  placeholderTextColor={Colors.textLight}
+                  value={vehicleForm.make}
+                  onChangeText={value => setVehicleForm(f => ({ ...f, make: value }))}
+                />
+                <TextInput
+                  style={styles.vehicleInput}
+                  placeholder="Vehicle model"
+                  placeholderTextColor={Colors.textLight}
+                  value={vehicleForm.model}
+                  onChangeText={value => setVehicleForm(f => ({ ...f, model: value }))}
+                />
+                <TextInput
+                  style={styles.vehicleInput}
+                  placeholder="Year"
+                  placeholderTextColor={Colors.textLight}
+                  value={vehicleForm.year}
+                  onChangeText={value => setVehicleForm(f => ({ ...f, year: value }))}
+                />
+                <TextInput
+                  style={styles.vehicleInput}
+                  placeholder="Colour"
+                  placeholderTextColor={Colors.textLight}
+                  value={vehicleForm.color}
+                  onChangeText={value => setVehicleForm(f => ({ ...f, color: value }))}
+                />
+                <TextInput
+                  style={styles.vehicleInput}
+                  placeholder="Registration plate"
+                  placeholderTextColor={Colors.textLight}
+                  autoCapitalize="characters"
+                  value={vehicleForm.plate}
+                  onChangeText={value => setVehicleForm(f => ({ ...f, plate: value }))}
+                />
+                <TextInput
+                  style={styles.vehicleInput}
+                  placeholder="Passenger seats (1-8)"
+                  placeholderTextColor={Colors.textLight}
+                  keyboardType="number-pad"
+                  value={vehicleForm.seatingCapacity}
+                  onChangeText={value => setVehicleForm(f => ({ ...f, seatingCapacity: value }))}
+                />
+
+                <View style={styles.vehicleEditorActions}>
+                  <Pressable
+                    style={styles.vehicleCancelBtn}
+                    onPress={() => setVehicleEditorOpen(false)}
+                    disabled={savingVehicle}
+                  >
+                    <Text style={styles.vehicleCancelText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.vehicleSaveBtn, savingVehicle && { opacity: 0.6 }]}
+                    onPress={saveVehicle}
+                    disabled={savingVehicle}
+                  >
+                    {savingVehicle
+                      ? <ActivityIndicator color={Colors.secondary} />
+                      : <Text style={styles.vehicleSaveText}>Save vehicle</Text>}
+                  </Pressable>
+                </View>
+              </View>
+            )}
+          </View>
 
           {rideHistory.length > 0 && (
             <View style={styles.historySection}>
@@ -520,51 +724,118 @@ export default function DriverScreen() {
       </View>
 
       {phase === 'online' && pendingRides.length > 0 && (
-        <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
+        <Animated.View
+          entering={SlideInDown.duration(400)}
+          style={[styles.bottomCard, { paddingBottom: bottomInset + 12, maxHeight: '68%' }]}
+        >
           <View style={styles.cardHandle} />
-          <Text style={styles.cardTitle}>Ride Request</Text>
+          <View style={styles.offerHeader}>
+            <Text style={styles.cardTitle}>Ride Offers</Text>
+            <Text style={styles.offerCount}>{pendingRides.length}/5</Text>
+          </View>
 
-          {pendingRides.slice(0, 1).map(ride => (
-            <View key={ride.id} style={styles.requestCard}>
-              <View style={styles.requestRoute}>
-                <View style={styles.routePoint}>
-                  <View style={styles.greenDot} />
-                  <Text style={styles.routeAddr} numberOfLines={1}>{ride.pickup.address}</Text>
-                </View>
-                <View style={styles.routeLine} />
-                <View style={styles.routePoint}>
-                  <View style={styles.orangeDot} />
-                  <Text style={styles.routeAddr} numberOfLines={1}>{ride.dropoff.address}</Text>
-                </View>
-              </View>
-              {ride.fare && (
-                <View style={styles.requestFare}>
-                  <View>
-                    <Text style={styles.requestFareLabel}>Your earnings</Text>
-                    <Text style={styles.requestFareAmount}>M{ride.fare.driverEarnings.toFixed(2)}</Text>
+          <ScrollView
+            style={styles.offerList}
+            contentContainerStyle={styles.offerListContent}
+            showsVerticalScrollIndicator
+            nestedScrollEnabled
+          >
+            {pendingRides.map(ride => {
+              const secondsLeft = Math.max(
+                0,
+                Math.ceil((ride.offerExpiresAt - currentTime) / 1000)
+              );
+
+              return (
+                <View key={ride.id} style={styles.requestCard}>
+                  <View style={styles.offerTopRow}>
+                    <View style={[
+                      styles.rideTypeBadge,
+                      ride.rideType === 'shared' && styles.sharedRideBadge,
+                    ]}>
+                      <Text style={styles.rideTypeText}>
+                        {ride.rideType === 'shared' ? 'SHARED' : 'PRIVATE'}
+                      </Text>
+                    </View>
+                    <Text style={[
+                      styles.offerCountdown,
+                      secondsLeft <= 10 && styles.offerCountdownUrgent,
+                    ]}>
+                      <Ionicons name="timer-outline" size={13} /> {secondsLeft}s left
+                    </Text>
                   </View>
-                  <View>
-                    <Text style={styles.requestFareLabel}>Distance</Text>
-                    <Text style={styles.requestDistance}>{ride.distance} KM</Text>
+
+                  <View style={styles.requestRoute}>
+                    <View style={styles.routePoint}>
+                      <View style={styles.greenDot} />
+                      <Text style={styles.routeAddr} numberOfLines={1}>{ride.pickup.address}</Text>
+                    </View>
+                    <View style={styles.routeLine} />
+                    <View style={styles.routePoint}>
+                      <View style={styles.orangeDot} />
+                      <Text style={styles.routeAddr} numberOfLines={1}>{ride.dropoff.address}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.offerMetaRow}>
+                    <Text style={styles.offerMetaText}>
+                      <Ionicons name="people-outline" size={14} /> {ride.passengerCount || 1} passenger{(ride.passengerCount || 1) === 1 ? '' : 's'}
+                    </Text>
+                    <Text style={styles.offerMetaText}>
+                      <Ionicons name="navigate-outline" size={14} /> {Number(ride.distance || 0).toFixed(1)} km
+                    </Text>
+                  </View>
+
+                  <View style={styles.requestFare}>
+                    <View>
+                      <Text style={styles.requestFareLabel}>Your earnings</Text>
+                      <Text style={styles.requestFareAmount}>
+                        M{(ride.fare?.driverEarnings || 0).toFixed(2)}
+                      </Text>
+                    </View>
+                    <Text style={styles.offerFareTotal}>
+                      Fare M{(ride.fare?.totalFare || 0).toFixed(2)}
+                    </Text>
+                  </View>
+
+                  <View style={styles.offerActions}>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.rejectBtn,
+                        pressed && styles.btnPressed,
+                        loading && styles.btnDisabled,
+                      ]}
+                      onPress={() => rejectRide(ride.id)}
+                      disabled={loading}
+                    >
+                      <Ionicons name="close" size={18} color={Colors.text} />
+                      <Text style={styles.rejectBtnText}>Reject</Text>
+                    </Pressable>
+
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.acceptBtn,
+                        styles.offerAcceptBtn,
+                        pressed && styles.btnPressed,
+                        loading && styles.btnDisabled,
+                      ]}
+                      onPress={() => acceptRide(ride.id)}
+                      disabled={loading || secondsLeft === 0}
+                    >
+                      {loading ? (
+                        <ActivityIndicator size="small" color={Colors.secondary} />
+                      ) : (
+                        <>
+                          <Ionicons name="checkmark" size={18} color={Colors.secondary} />
+                          <Text style={styles.acceptBtnText}>Accept</Text>
+                        </>
+                      )}
+                    </Pressable>
                   </View>
                 </View>
-              )}
-              <Pressable
-                style={({ pressed }) => [styles.acceptBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
-                onPress={() => acceptRide(ride.id)}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator size="small" color={Colors.secondary} />
-                ) : (
-                  <>
-                    <Ionicons name="checkmark" size={20} color={Colors.secondary} />
-                    <Text style={styles.acceptBtnText}>Accept Ride</Text>
-                  </>
-                )}
-              </Pressable>
-            </View>
-          ))}
+              );
+            })}
+          </ScrollView>
         </Animated.View>
       )}
 
@@ -744,6 +1015,55 @@ const styles = StyleSheet.create({
     borderRadius: 16, padding: 16, marginBottom: 20,
   },
   vehicleInfo: { flex: 1 },
+  vehicleCapacity: {
+    fontSize: 12, fontFamily: 'Inter_600SemiBold',
+    color: Colors.primary, marginTop: 5,
+  },
+  editVehicleBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    padding: 8,
+  },
+  editVehicleText: {
+    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.primary,
+  },
+  vehicleSection: { marginBottom: 20 },
+  vehicleEditor: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 16, padding: 16, marginTop: 4,
+  },
+  vehicleEditorTitle: {
+    fontSize: 17, fontFamily: 'Inter_700Bold',
+    color: Colors.textWhite, marginBottom: 6,
+  },
+  vehicleEditorNote: {
+    fontSize: 12, fontFamily: 'Inter_400Regular',
+    color: Colors.textLight, marginBottom: 14, lineHeight: 18,
+  },
+  vehicleInput: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12,
+    color: Colors.textWhite, fontSize: 14, marginBottom: 10,
+  },
+  vehicleEditorActions: {
+    flexDirection: 'row', justifyContent: 'flex-end',
+    alignItems: 'center', gap: 10, marginTop: 6,
+  },
+  vehicleCancelBtn: {
+    paddingVertical: 12, paddingHorizontal: 16,
+    borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  vehicleCancelText: {
+    color: Colors.textWhite, fontFamily: 'Inter_600SemiBold',
+  },
+  vehicleSaveBtn: {
+    paddingVertical: 12, paddingHorizontal: 18,
+    borderRadius: 10, backgroundColor: Colors.primary,
+    minWidth: 120, alignItems: 'center',
+  },
+  vehicleSaveText: {
+    color: Colors.secondary, fontFamily: 'Inter_700Bold',
+  },
   vehicleTitle: {
     fontSize: 15, fontFamily: 'Inter_600SemiBold', color: Colors.textWhite,
   },
@@ -834,6 +1154,63 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     fontSize: 20, fontFamily: 'Inter_700Bold', color: Colors.text, marginBottom: 12,
+  },
+  offerHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+  },
+  offerCount: {
+    fontSize: 13, fontFamily: 'Inter_700Bold', color: Colors.primary,
+    backgroundColor: Colors.background, paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: 12, overflow: 'hidden',
+  },
+  offerList: {
+    flexGrow: 0,
+  },
+  offerListContent: {
+    gap: 12, paddingBottom: 8,
+  },
+  offerTopRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+  },
+  rideTypeBadge: {
+    backgroundColor: Colors.background, paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: 8,
+  },
+  sharedRideBadge: {
+    backgroundColor: '#D9F7F2',
+  },
+  rideTypeText: {
+    fontSize: 11, fontFamily: 'Inter_700Bold', color: Colors.primary,
+  },
+  offerCountdown: {
+    fontSize: 12, fontFamily: 'Inter_600SemiBold', color: Colors.primary,
+  },
+  offerCountdownUrgent: {
+    color: Colors.accent,
+  },
+  offerMetaRow: {
+    flexDirection: 'row', justifyContent: 'space-between',
+  },
+  offerMetaText: {
+    fontSize: 12, fontFamily: 'Inter_500Medium', color: Colors.textLight,
+  },
+  offerFareTotal: {
+    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.text,
+    alignSelf: 'center',
+  },
+  offerActions: {
+    flexDirection: 'row', gap: 10,
+  },
+  rejectBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6, backgroundColor: Colors.background, paddingVertical: 13, borderRadius: 12,
+    borderWidth: 1, borderColor: Colors.border,
+  },
+  rejectBtnText: {
+    fontSize: 14, fontFamily: 'Inter_600SemiBold', color: Colors.text,
+  },
+  offerAcceptBtn: {
+    flex: 2, paddingVertical: 13,
   },
   requestCard: { gap: 14 },
   requestRoute: { gap: 4 },

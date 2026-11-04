@@ -21,6 +21,7 @@ interface AuthContextValue {
       year: string;
       color: string;
       plate: string;
+      seatingCapacity: number;
     };
   }) => Promise<SafeUser>;
   logout: () => Promise<void>;
@@ -83,6 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       year: string;
       color: string;
       plate: string;
+      seatingCapacity: number;
     };
   }): Promise<SafeUser> => {
     const res = await apiRequest('POST', '/api/auth/register', data);
@@ -103,6 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await apiRequest('GET', `/api/user/${user.id}`);
       const fresh = await res.json();
       setUser(fresh);
+      await AsyncStorage.setItem('rideflow_user', JSON.stringify(fresh));
     } catch {}
   };
 

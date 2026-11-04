@@ -493,6 +493,10 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
   const [minFare, setMinFare] = useState(config.minimumFare.toString());
   const [surge, setSurge] = useState(config.surgePricing);
   const [surgeMultiplier, setSurgeMultiplier] = useState(config.surgeMultiplier.toString());
+  const [dispatchInitialRadius, setDispatchInitialRadius] = useState(config.dispatchInitialRadiusKm.toString());
+  const [dispatchRadiusIncrement, setDispatchRadiusIncrement] = useState(config.dispatchRadiusIncrementKm.toString());
+  const [dispatchMaximumRadius, setDispatchMaximumRadius] = useState(config.dispatchMaximumRadiusKm.toString());
+  const [dispatchOfferWindow, setDispatchOfferWindow] = useState(config.dispatchOfferWindowSeconds.toString());
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -505,6 +509,10 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
     setMinFare(config.minimumFare.toString());
     setSurge(config.surgePricing);
     setSurgeMultiplier(config.surgeMultiplier.toString());
+    setDispatchInitialRadius(config.dispatchInitialRadiusKm.toString());
+    setDispatchRadiusIncrement(config.dispatchRadiusIncrementKm.toString());
+    setDispatchMaximumRadius(config.dispatchMaximumRadiusKm.toString());
+    setDispatchOfferWindow(config.dispatchOfferWindowSeconds.toString());
   }, [config]);
 
   const saveConfig = async (overrides?: Partial<PlatformConfig>) => {
@@ -518,6 +526,10 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
         minimumFare: parseFloat(minFare) || 20,
         surgePricing: surge,
         surgeMultiplier: parseFloat(surgeMultiplier) || 1.0,
+        dispatchInitialRadiusKm: Number(dispatchInitialRadius),
+        dispatchRadiusIncrementKm: Number(dispatchRadiusIncrement),
+        dispatchMaximumRadiusKm: Number(dispatchMaximumRadius),
+        dispatchOfferWindowSeconds: Number(dispatchOfferWindow),
         ...overrides,
       });
       setSaved(true);
@@ -567,6 +579,14 @@ function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateC
         {surge && (
           <ConfigRow label="Surge Multiplier (x)" value={surgeMultiplier} onChange={setSurgeMultiplier} />
         )}
+      </View>
+
+      <Text style={[styles.sectionTitle, { marginTop: 20 }]}>Ride Dispatch</Text>
+      <View style={styles.settingsCard}>
+        <ConfigRow label="Initial Search Radius (km)" value={dispatchInitialRadius} onChange={setDispatchInitialRadius} />
+        <ConfigRow label="Radius Expansion (km)" value={dispatchRadiusIncrement} onChange={setDispatchRadiusIncrement} />
+        <ConfigRow label="Maximum Search Radius (km)" value={dispatchMaximumRadius} onChange={setDispatchMaximumRadius} />
+        <ConfigRow label="Driver Response Window (seconds)" value={dispatchOfferWindow} onChange={setDispatchOfferWindow} />
       </View>
 
       {saveError ? (

@@ -50,6 +50,8 @@ export default function RiderScreen() {
   const [pickupAddress, setPickupAddress] = useState('Current Location');
   const [nearbyDrivers, setNearbyDrivers] = useState<NearbyDriver[]>([]);
   const [fareEstimate, setFareEstimate] = useState<any>(null);
+  const [rideType, setRideType] = useState<'private' | 'shared'>('private');
+  const [additionalPassengers, setAdditionalPassengers] = useState(0);
   const [activeRide, setActiveRide] = useState<Ride | null>(null);
   const [driverInfo, setDriverInfo] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -67,6 +69,7 @@ export default function RiderScreen() {
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const eventsInitializedRef = useRef(false);
   const locationRef = useRef(location);
+  const fareEstimateRequestRef = useRef(0);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   useEffect(() => { activeRideRef.current = activeRide; }, [activeRide]);
   useEffect(() => { locationRef.current = location; }, [location]);
@@ -368,21 +371,59 @@ export default function RiderScreen() {
   const handleConfirmDropoff = async () => {
     if (!dropoffCoord || !location) return;
     setLoading(true);
+    const requestId = ++fareEstimateRequestRef.current;
+
     try {
       const baseUrl = getApiUrl();
       const url = new URL(
-        `/api/fare/estimate?pLat=${location.lat}&pLng=${location.lng}&dLat=${dropoffCoord.lat}&dLng=${dropoffCoord.lng}`,
+        `/api/fare/estimate?pLat=${location.lat}&pLng=${location.lng}&dLat=${dropoffCoord.lat}&dLng=${dropoffCoord.lng}&additionalPassengers=${additionalPassengers}&rideType=${rideType}`,
         baseUrl
       );
       const res = await fetch(url.toString());
+      if (!res.ok) throw new Error('Fare estimate failed');
+
       const data = await res.json();
+
+      if (requestId !== fareEstimateRequestRef.current) return;
+
       setFareEstimate(data);
       setPhase('confirming');
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    } catch (e: any) {
-      showAlert('Error', 'Could not get fare estimate');
+    } catch {
+      if (requestId === fareEstimateRequestRef.current) {
+        showAlert('Error', 'Could not get fare estimate');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === fareEstimateRequestRef.current) {
+        setLoading(false);
+      }
+    }
+  };
+
+  const refreshFareEstimate = async (passengers: number, selectedRideType: 'private' | 'shared' = rideType) => {
+    if (!location || !dropoffCoord) return;
+
+    const requestId = ++fareEstimateRequestRef.current;
+
+    try {
+      const baseUrl = getApiUrl();
+      const url = new URL(
+        `/api/fare/estimate?pLat=${location.lat}&pLng=${location.lng}&dLat=${dropoffCoord.lat}&dLng=${dropoffCoord.lng}&additionalPassengers=${passengers}&rideType=${selectedRideType}`,
+        baseUrl
+      );
+
+      const res = await fetch(url.toString());
+      if (!res.ok) throw new Error('Fare estimate failed');
+
+      const data = await res.json();
+
+      if (requestId === fareEstimateRequestRef.current) {
+        setFareEstimate(data);
+      }
+    } catch {
+      if (requestId === fareEstimateRequestRef.current) {
+        showAlert('Error', 'Could not update the fare estimate');
+      }
     }
   };
 
@@ -392,6 +433,8 @@ export default function RiderScreen() {
     try {
       const res = await apiRequest('POST', '/api/rides', {
         riderId: user.id,
+        rideType,
+        additionalPassengers,
         pickup: { lat: location.lat, lng: location.lng, address: pickupAddress },
         dropoff: { lat: dropoffCoord.lat, lng: dropoffCoord.lng, address: dropoffAddress },
       });
@@ -587,6 +630,7 @@ export default function RiderScreen() {
         </View>
       </View>
 
+
       {phase === 'idle' && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
@@ -713,6 +757,87 @@ export default function RiderScreen() {
           <View style={styles.cardHandle} />
           <Text style={styles.cardTitle}>Confirm Your Ride</Text>
 
+          <Text style={styles.selectionLabel}>Choose your ride type</Text>
+          <View style={styles.rideTypeOptions}>
+            <Pressable
+              style={[
+                styles.rideTypeOption,
+                rideType === 'private' && styles.rideTypeOptionSelected,
+              ]}
+              onPress={() => {
+                setRideType('private');
+                refreshFareEstimate(additionalPassengers, 'private');
+              }}
+            >
+              <Ionicons
+                name="car-sport"
+                size={25}
+                color={rideType === 'private' ? Colors.primary : Colors.textLight}
+              />
+              <Text style={[
+                styles.rideTypeOptionTitle,
+                rideType === 'private' && styles.rideTypeOptionTitleSelected,
+              ]}>Private</Text>
+              <Text style={styles.rideTypeOptionDescription}>
+                Your group gets the vehicle
+              </Text>
+            </Pressable>
+
+            <Pressable
+              style={[
+                styles.rideTypeOption,
+                rideType === 'shared' && styles.rideTypeOptionSelected,
+              ]}
+              onPress={() => {
+                setRideType('shared');
+                refreshFareEstimate(additionalPassengers, 'shared');
+              }}
+            >
+              <Ionicons
+                name="people"
+                size={25}
+                color={rideType === 'shared' ? Colors.primary : Colors.textLight}
+              />
+              <Text style={[
+                styles.rideTypeOptionTitle,
+                rideType === 'shared' && styles.rideTypeOptionTitleSelected,
+              ]}>Shared</Text>
+              <Text style={styles.rideTypeOptionDescription}>
+                Share available seats
+              </Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.passengerSelector}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.selectionLabel}>Additional passengers</Text>
+              <Text style={styles.passengerHint}>You are already counted as one passenger</Text>
+            </View>
+            <Pressable
+              style={styles.passengerCounterButton}
+              disabled={additionalPassengers === 0}
+              onPress={() => {
+                const next = Math.max(0, additionalPassengers - 1);
+                setAdditionalPassengers(next);
+                refreshFareEstimate(next);
+              }}
+            >
+              <Ionicons name="remove" size={20} color={Colors.primary} />
+            </Pressable>
+            <Text style={styles.passengerCount}>{additionalPassengers}</Text>
+            <Pressable
+              style={styles.passengerCounterButton}
+              disabled={additionalPassengers === 7}
+              onPress={() => {
+                const next = Math.min(7, additionalPassengers + 1);
+                setAdditionalPassengers(next);
+                refreshFareEstimate(next);
+              }}
+            >
+              <Ionicons name="add" size={20} color={Colors.primary} />
+            </Pressable>
+          </View>
+
           <View style={styles.fareCard}>
             <View style={styles.fareMain}>
               <Text style={styles.fareLabel}>Estimated Fare</Text>
@@ -722,6 +847,18 @@ export default function RiderScreen() {
               <FareRow label="Base fare" value={`M${fareEstimate.baseFare.toFixed(2)}`} />
               <FareRow label={`Distance (${fareEstimate.distance} KM)`} value={`M${fareEstimate.distanceFare.toFixed(2)}`} />
               <FareRow label={`Time (~${fareEstimate.duration} min)`} value={`M${fareEstimate.timeFare.toFixed(2)}`} />
+              {additionalPassengers > 0 && (
+                <FareRow
+                  label={`Additional passengers (${additionalPassengers})`}
+                  value={`M${(fareEstimate.passengerFare || 0).toFixed(2)}`}
+                />
+              )}
+              {rideType === 'shared' && (fareEstimate.sharedDiscount || 0) > 0 && (
+                <FareRow
+                  label={`Shared discount (${fareEstimate.sharedRideDiscountPercent}%)`}
+                  value={`-M${fareEstimate.sharedDiscount.toFixed(2)}`}
+                />
+              )}
               </View>
           </View>
 
@@ -1048,6 +1185,71 @@ const styles = StyleSheet.create({
   },
   btnPressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   btnDisabled: { opacity: 0.6 },
+  selectionLabel: {
+    fontSize: 14,
+    fontFamily: 'Inter_600SemiBold',
+    color: Colors.text,
+    marginBottom: 8,
+  },
+  rideTypeOptions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 16,
+  },
+  rideTypeOption: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+    gap: 5,
+  },
+  rideTypeOptionSelected: {
+    borderColor: Colors.primary,
+    backgroundColor: 'rgba(54, 214, 197, 0.10)',
+  },
+  rideTypeOptionTitle: {
+    fontSize: 15,
+    fontFamily: 'Inter_600SemiBold',
+    color: Colors.text,
+  },
+  rideTypeOptionTitleSelected: {
+    color: Colors.primary,
+  },
+  rideTypeOptionDescription: {
+    fontSize: 11,
+    fontFamily: 'Inter_400Regular',
+    color: Colors.textLight,
+  },
+  passengerSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 16,
+  },
+  passengerHint: {
+    fontSize: 11,
+    fontFamily: 'Inter_400Regular',
+    color: Colors.textLight,
+  },
+  passengerCounterButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: Colors.background,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  passengerCount: {
+    minWidth: 18,
+    textAlign: 'center',
+    fontSize: 16,
+    fontFamily: 'Inter_700Bold',
+    color: Colors.text,
+  },
   fareCard: {
     backgroundColor: Colors.background, borderRadius: 16, padding: 16, marginBottom: 16,
   },

@@ -19,11 +19,16 @@ export interface User {
     year: string;
     color: string;
     plate: string;
+    seatingCapacity?: number;
   };
   rating?: number;
   totalRides?: number;
   totalEarnings?: number;
 }
+
+export type RideType = 'private' | 'shared';
+
+export type PassengerPricingMode = 'fixed' | 'multiplier';
 
 export interface PlatformConfig {
   baseFare: number;
@@ -33,15 +38,26 @@ export interface PlatformConfig {
   minimumFare: number;
   surgePricing: boolean;
   surgeMultiplier: number;
+  sharedRideDiscountPercent: number;
+  passengerPricingMode: PassengerPricingMode;
+  additionalPassengerFee: number;
+  additionalPassengerMultiplier: number;
+  dispatchInitialRadiusKm: number;
+  dispatchRadiusIncrementKm: number;
+  dispatchMaximumRadiusKm: number;
+  dispatchOfferWindowSeconds: number;
 }
 
-export type RideStatus = 'requested' | 'accepted' | 'arriving' | 'arrived' | 'in_progress' | 'completed' | 'cancelled';
+export type RideStatus = 'requested' | 'accepted' | 'arriving' | 'arrived' | 'in_progress' | 'completed' | 'cancelled' | 'no_drivers_available';
 
 export interface Ride {
   id: string;
   riderId: string;
   driverId?: string;
   status: RideStatus;
+  rideType?: RideType;
+  additionalPassengers?: number;
+  passengerCount?: number;
   pickup: {
     lat: number;
     lng: number;
@@ -56,6 +72,9 @@ export interface Ride {
     baseFare: number;
     distanceFare: number;
     timeFare: number;
+    passengerFare?: number;
+    sharedDiscount?: number;
+    sharedRideDiscountPercent?: number;
     totalFare: number;
     driverEarnings: number;
     platformFee: number;
@@ -78,7 +97,7 @@ export interface Ride {
 
 export interface WebhookEvent {
   id: string;
-  type: 'ride_requested' | 'ride_accepted' | 'driver_arriving' | 'driver_arrived' | 'ride_started' | 'ride_completed' | 'ride_cancelled';
+  type: 'ride_requested' | 'ride_accepted' | 'driver_arriving' | 'driver_arrived' | 'ride_started' | 'ride_completed' | 'ride_cancelled' | 'no_drivers_available';
   rideId: string;
   userId: string;
   data: Record<string, unknown>;
@@ -86,19 +105,34 @@ export interface WebhookEvent {
   read: boolean;
 }
 
+export const vehicleInfoSchema = z.object({
+  make: z.string().trim().min(1),
+  model: z.string().trim().min(1),
+  year: z.string().trim().min(1),
+  color: z.string().trim().min(1),
+  plate: z.string().trim().min(1),
+  seatingCapacity: z.number().int().min(1).max(8),
+});
+
 export const registerSchema = z.object({
   username: z.string().min(3),
   password: z.string().min(4),
   fullName: z.string().min(2),
   phone: z.string().min(7),
   role: z.enum(['rider', 'driver']),
-  vehicleInfo: z.object({
-    make: z.string(),
-    model: z.string(),
-    year: z.string(),
-    color: z.string(),
-    plate: z.string(),
-  }).optional(),
+  vehicleInfo: vehicleInfoSchema.optional(),
+}).superRefine((data, ctx) => {
+  if (data.role === 'driver' && !data.vehicleInfo) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['vehicleInfo'],
+      message: 'Vehicle details and passenger seating capacity are required for drivers.',
+    });
+  }
+});
+
+export const updateVehicleSchema = z.object({
+  vehicleInfo: vehicleInfoSchema,
 });
 
 export const loginSchema = z.object({
@@ -106,22 +140,22 @@ export const loginSchema = z.object({
   password: z.string(),
 });
 
+export const coordinateSchema = z.object({
+  lat: z.number().finite().min(-90).max(90),
+  lng: z.number().finite().min(-180).max(180),
+});
+
 export const requestRideSchema = z.object({
-  pickup: z.object({
-    lat: z.number(),
-    lng: z.number(),
-    address: z.string(),
+  rideType: z.enum(['private', 'shared']).default('private'),
+  additionalPassengers: z.number().int().min(0).max(7).default(0),
+  pickup: coordinateSchema.extend({
+    address: z.string().trim().min(1),
   }),
-  dropoff: z.object({
-    lat: z.number(),
-    lng: z.number(),
-    address: z.string(),
+  dropoff: coordinateSchema.extend({
+    address: z.string().trim().min(1),
   }),
 });
 
-export const updateLocationSchema = z.object({
-  lat: z.number(),
-  lng: z.number(),
-});
+export const updateLocationSchema = coordinateSchema;
 
 export type InsertUser = z.infer<typeof registerSchema>;
