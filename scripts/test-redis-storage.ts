@@ -4,7 +4,11 @@ import { calculateDistance } from "../shared/distance";
 
 import type { User, Ride } from "../shared/schema";
 
-const redisUrl = "redis://127.0.0.1:6389";
+const redisUrl = process.env.REDIS_TEST_URL;
+
+if (!redisUrl) {
+  throw new Error("REDIS_TEST_URL must point to a dedicated test Redis instance.");
+}
 
 let storage: any;
 let redisClient: any;
