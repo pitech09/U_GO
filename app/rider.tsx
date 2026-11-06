@@ -847,13 +847,16 @@ export default function RiderScreen() {
               <FareRow label="Base fare" value={`M${fareEstimate.baseFare.toFixed(2)}`} />
               <FareRow label={`Distance (${fareEstimate.distance} KM)`} value={`M${fareEstimate.distanceFare.toFixed(2)}`} />
               <FareRow label={`Time (~${fareEstimate.duration} min)`} value={`M${fareEstimate.timeFare.toFixed(2)}`} />
-              {additionalPassengers > 0 && (
+              {rideType === "private" && additionalPassengers > 0 && (
+                <FareRow label="Passengers" value={`${1 + additionalPassengers}`} />
+              )}
+              {rideType === "shared" && additionalPassengers > 0 && (
                 <FareRow
                   label={`Additional passengers (${additionalPassengers})`}
                   value={`M${(fareEstimate.passengerFare || 0).toFixed(2)}`}
                 />
               )}
-              {additionalPassengers > 0 && (fareEstimate.sharedDiscount || 0) > 0 && (
+              {rideType === "shared" && additionalPassengers > 0 && (fareEstimate.sharedDiscount || 0) > 0 && (
                 <FareRow
                   label={`Group discount (${fareEstimate.groupDiscountPercent}%)`}
                   value={`-M${fareEstimate.sharedDiscount.toFixed(2)}`}

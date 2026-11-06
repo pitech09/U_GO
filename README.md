@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🚗 RideFlow
+#  RideFlow
 
 ### Better rides, better pay.
 
@@ -26,16 +26,16 @@ Real GPS. Real maps. Real transparency. Built for iOS, Android, and the web from
 
 ---
 
-## ✨ Why RideFlow?
+##  Why RideFlow?
 
 Most ride-hailing apps hide how the money is split. RideFlow does the opposite — **every fare is transparent, and drivers keep 82% by default** (the platform fee is fully configurable from the admin panel). It ships with three real, role-aware experiences and uses native device capabilities instead of mock data.
 
-- 🗺️ **Real maps & GPS** — `react-native-maps` on mobile, Leaflet/OpenStreetMap on web, live location via `expo-location`.
-- 💸 **Transparent compensation** — riders, drivers, and admins all see exactly how a fare breaks down.
-- 👥 **Three real roles** — riders ride, drivers drive *and* ride, admins run the whole platform.
-- ⭐ **Ratings & reviews** — star ratings with private, admin-only review notes.
-- 🧱 **One codebase, three targets** — iOS, Android, and web from a single Expo project.
-- 💾 **Durable by default** — Redis with append-only-file persistence; data survives restarts.
+-  **Real maps & GPS** — `react-native-maps` on mobile, Leaflet/OpenStreetMap on web, live location via `expo-location`.
+-  **Transparent compensation** — riders, drivers, and admins all see exactly how a fare breaks down.
+-  **Three real roles** — riders ride, drivers drive *and* ride, admins run the whole platform.
+-  **Ratings & reviews** — star ratings with private, admin-only review notes.
+-  **One codebase, three targets** — iOS, Android, and web from a single Expo project.
+-  **Durable by default** — Redis with append-only-file persistence; data survives restarts.
 
 ---
 
@@ -75,7 +75,7 @@ Role-aware login, with administration access kept out of the way of everyday use
 
 ---
 
-## 🏗️ Architecture
+##  Architecture
 
 ```
 ┌──────────────────────────────┐         ┌──────────────────────────────┐
@@ -97,7 +97,7 @@ Role-aware login, with administration access kept out of the way of everyday use
 
 ---
 
-## 🧰 Tech Stack
+##  Tech Stack
 
 | Layer | Technology |
 |------|------------|
@@ -157,7 +157,7 @@ npm run expo:dev
 
 ---
 
-## 🔐 Default Credentials
+##  Default Credentials
 
 On first boot the backend seeds a single super-admin account:
 
@@ -171,7 +171,7 @@ To reach the admin login: on the welcome screen, **tap the version label (`v1.0`
 
 ---
 
-## 👥 Role Hierarchy
+##  Role Hierarchy
 
 - **Riders** — ride only. Map, booking, live tracking, and post-ride reviews.
 - **Drivers** — drive **and** ride. Earnings dashboard, online/offline toggle, ride acceptance & navigation, plus a one-tap switch into rider mode.
@@ -179,7 +179,7 @@ To reach the admin login: on the welcome screen, **tap the version label (`v1.0`
 
 ---
 
-## 💵 Fare & Compensation
+##  Fare & Compensation
 
 Fares are computed from a configurable model (editable live in **Admin → Settings**):
 
@@ -196,7 +196,7 @@ The remaining 18% is the platform fee — change the **Driver Share %** to whate
 
 ---
 
-## 📂 Project Structure
+##  Project Structure
 
 ```
 rideflow/
@@ -224,7 +224,7 @@ rideflow/
 
 ---
 
-## 🛰️ API Reference
+##  API Reference
 
 **Auth**
 - `POST /api/auth/register` · `POST /api/auth/login`
@@ -250,13 +250,13 @@ rideflow/
 
 ---
 
-## 🤝 Contributing
+##  Contributing
 
 Contributions are welcome! Please open an issue to discuss substantial changes before submitting a pull request. By contributing, you agree your contributions will be licensed under the GPLv3.
 
 ---
 
-## 📄 License
+##  License
 
 RideFlow is released under the **GNU General Public License v3.0 (or later)**. See [`LICENSE`](./LICENSE) for the full text.
 
@@ -264,5 +264,5 @@ You are free to use, study, share, and modify this software. If you distribute i
 
 <div align="center">
 <br/>
-<sub>Built with Expo, Express, and a belief that drivers deserve a bigger slice. 🚗💚</sub>
+<sub>Built with Expo, Express, and a belief that drivers deserve a bigger slice. </sub>
 </div>

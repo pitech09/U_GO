@@ -3,6 +3,7 @@ import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { storage } from "./storage";
+import { startDispatchScheduler } from "./dispatch";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -259,6 +260,8 @@ function setupErrorHandler(app: express.Application) {
   configureExpoAndLanding(app);
 
   const server = await registerRoutes(app);
+
+  startDispatchScheduler(storage);
 
   // Expo Router web fallback: serve the frontend for browser routes.
   app.get("/{*splat}", (req: Request, res: Response, next: NextFunction) => {
