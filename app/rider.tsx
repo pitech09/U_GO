@@ -56,18 +56,6 @@ export default function RiderScreen() {
   const [activeRide, setActiveRide] = useState<Ride | null>(null);
   const [driverInfo, setDriverInfo] = useState<any>(null);
   const [driverEtaMinutes, setDriverEtaMinutes] = useState<number | null>(null);
-  const [offers, setOffers] = useState<Array<{
-    rideId: string;
-    ride: Ride;
-    driverId: string;
-    offer: {
-      driverId: string;
-      rideId: string;
-      createdAt: number;
-      expiresAt: number;
-      status: 'pending' | 'expired';
-    };
-  }>>([]);
   const [loading, setLoading] = useState(false);
   const [addressInput, setAddressInput] = useState('');
   const [addressSearching, setAddressSearching] = useState(false);
@@ -240,36 +228,6 @@ export default function RiderScreen() {
       }
     } catch {}
   };
-
-  useEffect(() => {
-    if (phase === 'waiting' && activeRide?.id) {
-      const fetchData = async () => {
-        if (!user?.id) return;
-        try {
-          const res = await fetch(
-            `/api/rides/rider/${user.id}/offers?rideId=${activeRide.id}`,
-            { cache: 'no-store' }
-          );
-          if (res.ok) {
-            const data: Array<{
-              rideId: string;
-              ride: Ride;
-              driverId: string;
-              offer: {
-                driverId: string;
-                rideId: string;
-                createdAt: number;
-                expiresAt: number;
-                status: 'pending' | 'expired';
-              };
-            }> = await res.json();
-            setOffers(data);
-          }
-        } catch {}
-      };
-      fetchData();
-    }
-  }, [phase]);
 
   const pollUserEvents = async () => {
     if (!user?.id) return;
@@ -1024,86 +982,13 @@ export default function RiderScreen() {
       {phase === 'waiting' && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
-          <Text style={styles.cardTitle}>Waiting for drivers</Text>
-
-          {offers.length > 0 && (
-            <View style={styles.offersContainer}>
-              {offers.map((offer) => (
-                <View key={offer.driverId} style={styles.offerCard}>
-                  <View style={styles.offerHeader}>
-                    <Text style={styles.offerDriverName}>{offer.ride.riderName}</Text>
-                    <Text style={styles.offerRating}>Driver offer</Text>
-                  </View>
-                  <View style={styles.offerMeta}>
-                    <Text style={styles.offerSeats}>
-                      {offer.ride.passengerCount} passengers
-                    </Text>
-                    <Text style={styles.offerSeats}>
-                      {offer.offer.expiresAt > Date.now() ? 'Active' : 'Expired'}
-                    </Text>
-                  </View>
-                  <View style={styles.offerFareRow}>
-                    <Text style={styles.offerFareLabel}>Fare</Text>
-                    <Text style={styles.offerFarePrice}>
-                      M{offer.ride.fare?.totalFare?.toFixed(2) ?? '0.00'}
-                    </Text>
-                  </View>
-                  <View style={styles.offerActions}>
-                    <Pressable
-                      style={({ pressed }) => [styles.acceptBtn, pressed && styles.btnPressed]}
-                      onPress={async () => {
-                        try {
-                          await apiRequest('PUT', `/api/rides/${offer.ride.id}/accept`, {
-                            driverId: offer.driverId,
-                          });
-                          setActiveRide(offer.ride);
-                          setPhase('matched');
-                          if (offer.driverId) fetchDriverInfo(offer.driverId);
-                        } catch (e: any) {
-                          showAlert('Error', e.message || 'Could not accept offer');
-                        }
-                      }}
-                    >
-                      <Ionicons name="caret-forward-sharp" size={16} color={Colors.background} />
-                      <Text style={styles.acceptBtnText}>Accept</Text>
-                    </Pressable>
-                    <Pressable
-                      style={({ pressed }) => [styles.rejectBtn, pressed && styles.btnPressed]}
-                      onPress={async () => {
-                        try {
-                          await apiRequest('PUT', `/api/rides/${offer.ride.id}/reject`, {
-                            driverId: offer.driverId,
-                          });
-                          const remaining = offers.filter(
-                            o => o.driverId !== offer.driverId
-                          );
-                          setOffers(remaining);
-                          if (remaining.length === 0) {
-                            setOffers([]);
-                          }
-                        } catch (e: any) {
-                          showAlert('Error', e.message || 'Could not reject offer');
-                        }
-                      }}
-                    >
-                      <Ionicons name="close-sharp" size={16} color={Colors.error} />
-                      <Text style={styles.rejectBtnText}>Reject</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              ))}
-            </View>
-          )}
-
-          {offers.length === 0 && (
-            <View style={styles.waitingContent}>
-              <ActivityIndicator size="large" color={Colors.primary} />
-              <Text style={styles.waitingTitle}>Finding drivers for your ride</Text>
-              <Text style={styles.waitingSubtitle}>
-                Drivers nearby are assessing your route. You'll be notified when an offer arrives.
-              </Text>
-            </View>
-          )}
+          <View style={styles.waitingContent}>
+            <ActivityIndicator size="large" color={Colors.primary} />
+            <Text style={styles.waitingTitle}>Finding drivers for your ride</Text>
+            <Text style={styles.waitingSubtitle}>
+              Drivers nearby are assessing your route. You'll be notified when a driver accepts.
+            </Text>
+          </View>
 
           <Pressable
             style={({ pressed }) => [styles.cancelRideBtn, pressed && styles.btnPressed]}
@@ -1580,56 +1465,6 @@ const styles = StyleSheet.create({
   },
   waitingSubtitle: {
     fontSize: 14, fontFamily: 'Inter_400Regular', color: Colors.textLight,
-  },
-  offersContainer: {
-    gap: 10, marginBottom: 12,
-  },
-  offerCard: {
-    backgroundColor: Colors.surface, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: Colors.border,
-  },
-  offerHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6,
-  },
-  offerDriverName: {
-    fontSize: 15, fontFamily: 'Inter_600SemiBold', color: Colors.text,
-  },
-  offerRating: {
-    fontSize: 13, fontFamily: 'Inter_500Medium', color: Colors.warning,
-  },
-  offerMeta: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8,
-  },
-  offerVehicle: {
-    fontSize: 12, fontFamily: 'Inter_400Regular', color: Colors.textLight,
-  },
-  offerSeats: {
-    fontSize: 12, fontFamily: 'Inter_400Regular', color: Colors.textLight,
-  },
-  offerFareRow: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8,
-  },
-  offerFareLabel: {
-    fontSize: 12, fontFamily: 'Inter_400Regular', color: Colors.textLight,
-  },
-  offerFarePrice: {
-    fontSize: 16, fontFamily: 'Inter_700Bold', color: Colors.primary,
-  },
-  offerActions: {
-    flexDirection: 'row', gap: 8, marginTop: 10,
-  },
-  acceptBtn: {
-    flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6,
-    backgroundColor: Colors.primary, paddingVertical: 10, borderRadius: 12,
-  },
-  acceptBtnText: {
-    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.background,
-  },
-  rejectBtn: {
-    flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6,
-    backgroundColor: 'rgba(255, 59, 48, 0.08)', paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: Colors.error,
-  },
-  rejectBtnText: {
-    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.error,
   },
   cancelRideBtn: {
     backgroundColor: 'rgba(255, 59, 48, 0.1)', paddingVertical: 14, borderRadius: 14, alignItems: 'center', marginTop: 8,
