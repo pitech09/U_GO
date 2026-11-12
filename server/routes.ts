@@ -329,10 +329,92 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     }
   });
 
+  app.put("/api/rides/:id/payment", async (req: Request, res: Response) => {
+    const ride = await routeStorage.getRide(getRouteParam(req.params.id));
+    if (!ride) return res.status(404).json({ message: "Ride not found" });
+    if (ride.riderId !== req.body.riderId) {
+      return res.status(403).json({ message: "Only the rider can submit this payment" });
+    }
+    if (ride.status !== 'in_progress') {
+      return res.status(409).json({ message: "Payment can be initiated after the ride has started" });
+    }
+
+    const method = req.body.paymentMethod;
+    if (!['cash', 'mpesa', 'ecocash'].includes(method)) {
+      return res.status(400).json({ message: "Choose cash, M-Pesa, or EcoCash" });
+    }
+
+    const reference = typeof req.body.paymentReference === 'string'
+      ? req.body.paymentReference.trim()
+      : '';
+    if (method !== 'cash' && !reference) {
+      return res.status(400).json({ message: "A mobile-money transaction reference is required" });
+    }
+
+    const proofImage = req.body.paymentProofImage;
+    if (proofImage !== undefined && (
+      typeof proofImage !== 'string' ||
+      proofImage.length > 6_000_000 ||
+      !/^data:image\/(?:png|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/.test(proofImage)
+    )) {
+      return res.status(400).json({ message: "Payment proof must be a PNG or JPEG image" });
+    }
+
+    const updated = await routeStorage.updateRide(ride.id, {
+      payment: {
+        method,
+        status: method === 'cash' ? 'pending_cash' : 'pending_verification',
+        transactionReference: reference || undefined,
+        proofImage,
+        submittedAt: new Date().toISOString(),
+      },
+    });
+
+    return res.json(updated);
+  });
+
+  app.put("/api/admin/rides/:id/payment", async (req: Request, res: Response) => {
+    const { status, adminId } = req.body as { status?: string; adminId?: string };
+    if (!adminId) return res.status(400).json({ message: "adminId required" });
+
+    const admin = await routeStorage.getUser(adminId);
+    if (!admin || admin.role !== 'admin') {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    if (status !== 'paid' && status !== 'rejected') {
+      return res.status(400).json({ message: "Payment status must be paid or rejected" });
+    }
+
+    const ride = await routeStorage.getRide(getRouteParam(req.params.id));
+    if (!ride?.payment) return res.status(404).json({ message: "Payment not found" });
+
+    const updated = await routeStorage.updateRide(ride.id, {
+      payment: {
+        ...ride.payment,
+        status,
+        verifiedAt: new Date().toISOString(),
+        verifiedBy: admin.id,
+      },
+    });
+
+    return res.json(updated);
+  });
+
   app.get("/api/rides/available", async (_req: Request, res: Response) => {
     const active = await routeStorage.getActiveRides();
     const requested = active.filter(r => r.status === 'requested');
     return res.json(requested);
+  });
+
+  app.get("/api/rides/rider/:riderId/offers", async (req: Request, res: Response) => {
+    try {
+      const riderId = getRouteParam(req.params.riderId);
+      const offers = await routeStorage.getRideOffersForRider(riderId);
+      return res.json(offers);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message || "Could not fetch ride offers" });
+    }
   });
 
   app.get("/api/rides/rider/:riderId", async (req: Request, res: Response) => {
@@ -369,7 +451,11 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
         ride => !['completed', 'cancelled'].includes(ride.status)
       );
 
-      if (activeRide) return res.json([]);
+      // A driver with an active PRIVATE ride cannot receive new offers.
+      // A driver with an active SHARED ride can still receive eligible offers.
+      if (activeRide && activeRide.rideType === 'private') {
+        return res.json([]);
+      }
 
       // Remove queued offers that this vehicle can no longer accommodate.
       let offers = await routeStorage.getDriverRideOffers(driverId);
@@ -406,8 +492,8 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
 
   app.get("/api/rides/driver/:driverId/active", async (req: Request, res: Response) => {
     const rides = await routeStorage.getRidesByDriver(getRouteParam(req.params.driverId));
-    const active = rides.find(r => !['completed', 'cancelled'].includes(r.status));
-    return res.json(active || null);
+    const active = rides.filter(r => !['completed', 'cancelled'].includes(r.status));
+    return res.json(active.length > 0 ? active : null);
   });
 
   app.get("/api/rides/rider/:riderId/active", async (req: Request, res: Response) => {
@@ -415,8 +501,8 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     const active = rides.find(r => !['completed', 'cancelled'].includes(r.status));
     if (active) return res.json(active);
 
-    const recentCompleted = rides
-      .filter(r => r.status === 'completed' && r.completedAt)
+      const recentCompleted = rides
+      .filter(r => r.status === 'completed' && r.completedAt && !r.review)
       .sort((a, b) => new Date(b.completedAt!).getTime() - new Date(a.completedAt!).getTime())[0];
     if (recentCompleted) {
       const completedAgo = Date.now() - new Date(recentCompleted.completedAt!).getTime();

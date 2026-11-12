@@ -281,7 +281,7 @@ test("Private fare estimate uses the private fare calculation", async () => {
   assert.equal(result.sharedRideDiscountPercent, 0);
 });
 
-test("Solo Shared fare estimate does not apply a group discount", async () => {
+test("Shared fare estimate applies the configured Shared discount", async () => {
   const response = await fetch(estimateUrl("shared"));
   assert.equal(response.status, 200);
 
@@ -302,8 +302,8 @@ test("Solo Shared fare estimate does not apply a group discount", async () => {
   const expected = calculateFareBreakdown(distance, config, 0, "shared");
 
   assert.equal(result.totalFare, expected.totalFare);
-  assert.equal(result.sharedDiscount, 0);
-  assert.equal(result.sharedRideDiscountPercent, 0);
+  assert.ok(result.sharedDiscount > 0);
+  assert.equal(result.sharedRideDiscountPercent, 15);
   assert.equal(result.groupDiscountPercent, 0);
 });
 
@@ -354,8 +354,8 @@ test("Shared booking preserves ride type and passenger count", async () => {
   assert.equal(ride.rideType, "shared");
   assert.equal(ride.additionalPassengers, 2);
   assert.equal(ride.passengerCount, 3);
-  assert.equal(ride.fare?.sharedRideDiscountPercent, 0);
-  assert.equal(ride.fare?.groupDiscountPercent, 20);
+  assert.equal(ride.fare?.sharedRideDiscountPercent, 15);
+  assert.equal(ride.fare?.groupDiscountPercent, 0);
   assert.ok((ride.fare?.sharedDiscount ?? 0) > 0);
 
   const captured = bookingInputs.at(-1);
@@ -383,6 +383,49 @@ test("Private booking remains undiscounted", async () => {
   assert.equal(ride.rideType, "private");
   assert.equal(ride.passengerCount, 1);
   assert.equal(ride.fare?.sharedDiscount, 0);
+});
+
+test("Private estimate equals the actual booking fare for every passenger count", async () => {
+  const privateFares: number[] = [];
+
+  for (const additionalPassengers of [0, 1, 2, 3]) {
+    const estimateResponse = await fetch(
+      estimateUrl("private", additionalPassengers)
+    );
+    assert.equal(estimateResponse.status, 200);
+
+    const estimate = await estimateResponse.json() as Ride["fare"];
+
+    const bookingResponse = await fetch(`${baseUrl}/api/rides`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        riderId: rider.id,
+        rideType: "private",
+        additionalPassengers,
+        pickup,
+        dropoff,
+      }),
+    });
+
+    assert.equal(bookingResponse.status, 200);
+
+    const ride = await bookingResponse.json() as Ride;
+    assert.equal(ride.passengerCount, additionalPassengers + 1);
+    assert.equal(ride.fare?.totalFare, estimate?.totalFare);
+    assert.equal(ride.fare?.driverEarnings, estimate?.driverEarnings);
+    assert.equal(ride.fare?.platformFee, estimate?.platformFee);
+    assert.equal(ride.fare?.passengerFare, 0);
+    assert.equal(ride.fare?.sharedDiscount, 0);
+    assert.equal(ride.fare?.groupDiscountPercent, 0);
+
+    privateFares.push(ride.fare?.totalFare ?? NaN);
+  }
+
+  assert.deepEqual(
+    privateFares,
+    [privateFares[0], privateFares[0], privateFares[0], privateFares[0]]
+  );
 });
 
 test("Booking rejects more than seven additional passengers", async () => {
@@ -1075,4 +1118,3 @@ test("Driver offer endpoint rejects previously queued offers that exceed capacit
   assert.deepEqual(offersByDriver.get(candidate.id), []);
   resetOfferTestState();
 });
-

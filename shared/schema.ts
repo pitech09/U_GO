@@ -28,6 +28,19 @@ export interface User {
 
 export type RideType = 'private' | 'shared';
 
+export type PaymentMethod = 'cash' | 'mpesa' | 'ecocash';
+export type PaymentStatus = 'pending_cash' | 'pending_verification' | 'paid' | 'rejected';
+
+export interface RidePayment {
+  method: PaymentMethod;
+  status: PaymentStatus;
+  transactionReference?: string;
+  proofImage?: string;
+  submittedAt: string;
+  verifiedAt?: string;
+  verifiedBy?: string;
+}
+
 export type PassengerPricingMode = 'fixed' | 'multiplier';
 
 export interface PlatformConfig {
@@ -81,6 +94,7 @@ export interface Ride {
     driverEarnings: number;
     platformFee: number;
   };
+  payment?: RidePayment;
   distance?: number;
   duration?: number;
   createdAt: string;
@@ -156,6 +170,12 @@ export const requestRideSchema = z.object({
   dropoff: coordinateSchema.extend({
     address: z.string().trim().min(1),
   }),
+  paymentMethod: z.enum(['cash', 'mpesa', 'ecocash']).optional(),
+  paymentReference: z.string().trim().max(80).optional(),
+  paymentProofImage: z.string()
+    .max(6_000_000)
+    .regex(/^data:image\/(?:png|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/, 'Payment proof must be a PNG or JPEG image.')
+    .optional(),
 });
 
 export const updateLocationSchema = coordinateSchema;

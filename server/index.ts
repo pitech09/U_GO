@@ -25,13 +25,13 @@ function setupCors(app: express.Application) {
     }
 
     if (process.env.REPLIT_DOMAINS) {
-      process.env.REPLIT_DOMAINS.split(",").forEach((d) => {
+      process.env.REPLIT_DOMAINS.split(",").forEach((d: string) => {
         origins.add(`https://${d.trim()}`);
       });
     }
 
     if (process.env.CORS_ALLOWED_ORIGINS) {
-      process.env.CORS_ALLOWED_ORIGINS.split(",").forEach((value) => {
+      process.env.CORS_ALLOWED_ORIGINS.split(",").forEach((value: string) => {
         const allowedOrigin = value.trim().replace(/\/+$/, "");
         if (allowedOrigin) origins.add(allowedOrigin);
       });
@@ -65,6 +65,9 @@ function setupCors(app: express.Application) {
 function setupBodyParsing(app: express.Application) {
   app.use(
     express.json({
+      // Payment screenshots are sent as base64 JSON. A small image can be
+      // larger on the wire, so leave headroom while retaining a firm cap.
+      limit: "10mb",
       verify: (req, _res, buf) => {
         req.rawBody = buf;
       },

@@ -1,6 +1,7 @@
 
 import React, {
   forwardRef,
+  useCallback,
   useImperativeHandle,
   useRef,
   useState,
@@ -45,7 +46,19 @@ interface MarkerProps {
   identifier?: string;
 }
 
+interface PolylineProps {
+  coordinates: { latitude: number; longitude: number }[];
+  strokeColor?: string;
+  strokeWidth?: number;
+  onPress?: () => void;
+  identifier?: string;
+}
+
 export const Marker = (_props: MarkerProps) => {
+  return null;
+};
+
+export const Polyline = (_props: PolylineProps) => {
   return null;
 };
 
@@ -193,6 +206,8 @@ const WebMapView = forwardRef<any, MapViewProps>((props, ref) => {
   const mapInstanceRef = useRef<any>(null);
   const markersLayerRef = useRef<any>(null);
   const userMarkerRef = useRef<any>(null);
+  const polylineLayerRef = useRef<any>(null);
+  const polyLinesRef = useRef<Map<string, any>>(new Map());
 
   const [ready, setReady] = useState(false);
 
@@ -205,6 +220,46 @@ const WebMapView = forwardRef<any, MapViewProps>((props, ref) => {
     return Math.min(18, Math.max(2, Math.round(Math.log2(360 / delta))));
   };
 
+  const fitToCoordinates = useCallback(() => {
+    if (!mapInstanceRef.current || markersLayerRef.current == null) return;
+
+    const allLatLngs: [number, number][] = [];
+
+    // Collect all marker coordinates
+    if (markersLayerRef.current) {
+      markersLayerRef.current.eachLayer((layer: any) => {
+        if (layer.getLatLng) {
+          const latLng = layer.getLatLng() as any;
+          if (latLng && typeof latLng === 'object' && latLng.lat !== undefined && latLng.lng !== undefined) {
+            allLatLngs.push(latLng.lat, latLng.lng);
+          }
+        }
+      });
+    }
+
+    // Collect all polyline coordinates
+    if (polylineLayerRef.current) {
+      polylineLayerRef.current.eachLayer((layer: any) => {
+        if (layer.getLatLngs) {
+          const latLngs = layer.getLatLngs();
+          if (Array.isArray(latLngs)) {
+            latLngs.forEach((latLng: any) => {
+              if (latLng && typeof latLng === 'object' && latLng.lat !== undefined && latLng.lng !== undefined) {
+                allLatLngs.push(latLng.lat, latLng.lng);
+              }
+            });
+          }
+        }
+      });
+    }
+
+    if (allLatLngs.length === 0) return;
+
+    // Group coordinates into [lat, lng, lat, lng, ...] format for Leaflet
+    const bounds = (window as any).L.latLng(allLatLngs as [number, number][]);
+    mapInstanceRef.current.fitBounds(bounds, { padding: 50 });
+  }, []);
+
   useImperativeHandle(ref, () => ({
     animateToRegion: (newRegion: Region, _duration?: number) => {
       if (mapInstanceRef.current) {
@@ -215,7 +270,7 @@ const WebMapView = forwardRef<any, MapViewProps>((props, ref) => {
       }
     },
 
-    fitToCoordinates: () => {},
+    fitToCoordinates,
 
     getCamera: () => Promise.resolve(null),
   }));
@@ -304,6 +359,7 @@ const WebMapView = forwardRef<any, MapViewProps>((props, ref) => {
         .addTo(map);
 
       markersLayerRef.current = L.layerGroup().addTo(map);
+      polylineLayerRef.current = L.layerGroup().addTo(map);
 
       // Map click handling
       map.on('click', (e: any) => {
@@ -347,6 +403,12 @@ const WebMapView = forwardRef<any, MapViewProps>((props, ref) => {
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove();
         mapInstanceRef.current = null;
+
+        // Remove all polyline layers
+        polyLinesRef.current.forEach((polyline) => {
+          mapInstanceRef.current?.removeLayer(polyline);
+        });
+        polyLinesRef.current.clear();
       }
     };
   }, []);
@@ -368,12 +430,13 @@ const WebMapView = forwardRef<any, MapViewProps>((props, ref) => {
     }
   }, [region?.latitude, region?.longitude]);
 
-  // Render map markers
+  // Render map markers and polylines
   useEffect(() => {
     if (
       !ready ||
       !mapInstanceRef.current ||
-      !markersLayerRef.current
+      !markersLayerRef.current ||
+      !polylineLayerRef.current
     ) {
       return;
     }
@@ -382,46 +445,65 @@ const WebMapView = forwardRef<any, MapViewProps>((props, ref) => {
     if (!L) return;
 
     markersLayerRef.current.clearLayers();
+    polylineLayerRef.current.clearLayers();
 
     React.Children.forEach(children, (child: any) => {
-      if (!child || !child.props?.coordinate) return;
+      if (!child) return;
 
-      const { coordinate, title } = child.props;
+      if (child.type === Marker) {
+        if (!child.props?.coordinate) return;
 
-      const bgColor = getMarkerColorFromChild(child);
-      const iconInfo = getMarkerIconName(child);
+        const { coordinate, title } = child.props;
 
-      const hasCustomChildren = child.props.children != null;
-      const markerSize = hasCustomChildren ? 28 : 14;
+        const bgColor = getMarkerColorFromChild(child);
+        const iconInfo = getMarkerIconName(child);
 
-      const html = hasCustomChildren
-        ? buildMarkerHtml(bgColor, iconInfo, markerSize)
-        : `<div style="width:${markerSize}px;height:${markerSize}px;border-radius:50%;background:${bgColor};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>`;
+        const hasCustomChildren = child.props.children != null;
+        const markerSize = hasCustomChildren ? 28 : 14;
 
-      const markerIcon = L.divIcon({
-        className: 'custom-marker',
-        html,
-        iconSize: [markerSize, markerSize],
-        iconAnchor: [markerSize / 2, markerSize / 2],
-      });
+        const html = hasCustomChildren
+          ? buildMarkerHtml(bgColor, iconInfo, markerSize)
+          : `<div style="width:${markerSize}px;height:${markerSize}px;border-radius:50%;background:${bgColor};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>`;
 
-      const marker = L.marker(
-        [coordinate.latitude, coordinate.longitude],
-        { icon: markerIcon }
-      );
-
-      if (title) {
-        marker.bindTooltip(title, {
-          direction: 'top',
-          offset: [0, -(markerSize / 2 + 4)],
+        const markerIcon = L.divIcon({
+          className: 'custom-marker',
+          html,
+          iconSize: [markerSize, markerSize],
+          iconAnchor: [markerSize / 2, markerSize / 2],
         });
-      }
 
-      if (child.props.onPress) {
-        marker.on('click', child.props.onPress);
-      }
+        const marker = L.marker(
+          [coordinate.latitude, coordinate.longitude],
+          { icon: markerIcon }
+        );
 
-      marker.addTo(markersLayerRef.current);
+        if (title) {
+          marker.bindTooltip(title, {
+            direction: 'top',
+            offset: [0, -(markerSize / 2 + 4)],
+          });
+        }
+
+        if (child.props.onPress) {
+          marker.on('click', child.props.onPress);
+        }
+
+        marker.addTo(markersLayerRef.current);
+      } else if (child.type === Polyline) {
+        if (!child.props?.coordinates) return;
+
+        const { coordinates, strokeColor, strokeWidth } = child.props;
+
+        const points = coordinates.map((c: { latitude: number; longitude: number }) => [c.latitude, c.longitude]);
+        const polyline = (window as any).L.polyline(points, {
+          color: strokeColor || '#34A853',
+          weight: strokeWidth || 3,
+          opacity: 0.8,
+          smoothFactor: 1,
+        }).addTo(polylineLayerRef.current);
+
+        polyLinesRef.current.set(`polyline-${child.key}`, polyline);
+      }
     });
   }, [children, ready]);
 
@@ -449,6 +531,13 @@ const webStyles = StyleSheet.create({
     flex: 1,
     overflow: 'hidden',
     position: 'relative',
+  },
+  polylineContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
   },
 });
 

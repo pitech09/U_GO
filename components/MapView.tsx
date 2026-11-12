@@ -2,6 +2,7 @@
 import { Platform } from 'react-native';
 import MapView, {
   Marker,
+  Polyline,
   PROVIDER_DEFAULT,
   UrlTile,
 } from 'react-native-maps';
@@ -40,5 +41,5 @@ export function CartoTileLayer() {
   );
 }
 
-export { Marker, PROVIDER_DEFAULT };
+export { Marker, Polyline, PROVIDER_DEFAULT };
 export default MapView;

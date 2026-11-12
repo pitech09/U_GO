@@ -57,34 +57,30 @@ export function calculateFareBreakdown(
     };
   }
 
-  // Shared rides preserve individual passenger fare calculation with
-  // group discount applied when multiple passengers share the vehicle.
-  const { groupDiscountPercent } = config;
+  // Shared rides are discounted individual bookings. Matching several
+  // Shared riders into one vehicle is a dispatch concern, not a multiplier
+  // on one rider's fare.
+  const discountPercent = Number.isFinite(config.sharedRideDiscountPercent)
+    ? Math.max(0, Math.min(90, config.sharedRideDiscountPercent))
+    : 15;
+  const discountedSubtotal = Math.max(
+    minimumFare,
+    tripSubtotal * (1 - discountPercent / 100)
+  );
+  const sharedDiscount = tripSubtotal - discountedSubtotal;
+  const appliedDiscountPercent = sharedDiscount > 0 ? discountPercent : 0;
 
-  const passengerCount = 1 + Math.max(0, Math.min(7, Math.floor(additionalPassengers)));
-  const groupSubtotal = tripSubtotal * passengerCount;
-  const discountPercent = Number.isFinite(groupDiscountPercent)
-    ? Math.max(0, Math.min(90, groupDiscountPercent))
-    : 20;
-
-  const appliedDiscountPercent = passengerCount > 1 ? discountPercent : 0;
-  const sharedDiscount = passengerCount > 1
-    ? groupSubtotal - Math.max(minimumFare, groupSubtotal * (1 - discountPercent / 100))
-    : 0;
-
-  let totalFare = groupSubtotal - sharedDiscount;
+  let totalFare = discountedSubtotal;
   if (surgePricing) totalFare *= surgeMultiplierValue;
-
-  const passengerFare = tripSubtotal * (passengerCount - 1);
 
   return {
     baseFare: round2(baseFare),
     distanceFare: round2(distanceFare),
     timeFare: round2(timeFare),
-    passengerFare: round2(passengerFare),
+    passengerFare: 0,
     sharedDiscount: round2(sharedDiscount),
-    sharedRideDiscountPercent: 0,
-    groupDiscountPercent: appliedDiscountPercent,
+    sharedRideDiscountPercent: appliedDiscountPercent,
+    groupDiscountPercent: 0,
     totalFare: round2(totalFare),
     driverEarnings: round2(totalFare * driverPercent),
     platformFee: round2(totalFare * (1 - driverPercent)),

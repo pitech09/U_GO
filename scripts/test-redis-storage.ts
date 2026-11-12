@@ -39,17 +39,17 @@ after(async () => {
   }
 });
 
-test("RedisStorage saves and retrieves a Shared ride with its complete group fare", async () => {
+test("RedisStorage saves and retrieves a Shared ride with its discounted fare", async () => {
   // Verify the initial default configuration.
   const defaults = await storage.getConfig();
   assert.equal(defaults.sharedRideDiscountPercent, 15);
 
-  // Configure the group discount and verify persistence.
+  // Configure the Shared discount and verify persistence.
   const config = await storage.updateConfig({
-    groupDiscountPercent: 20,
+    sharedRideDiscountPercent: 20,
   });
 
-  assert.equal(config.groupDiscountPercent, 20);
+  assert.equal(config.sharedRideDiscountPercent, 20);
 
   const rider = await storage.createUser(riderInput);
 
@@ -86,9 +86,9 @@ test("RedisStorage saves and retrieves a Shared ride with its complete group far
     "shared"
   );
 
-  assert.equal(estimate.sharedRideDiscountPercent, 0);
-  assert.equal(estimate.groupDiscountPercent, 20);
-  assert.ok(estimate.passengerFare > 10);
+  assert.equal(estimate.sharedRideDiscountPercent, 20);
+  assert.equal(estimate.groupDiscountPercent, 0);
+  assert.equal(estimate.passengerFare, 0);
   assert.ok(estimate.sharedDiscount > 0);
 
   // Create the booking through the actual RedisStorage implementation.
@@ -101,8 +101,8 @@ test("RedisStorage saves and retrieves a Shared ride with its complete group far
   assert.equal(savedRide.status, "requested");
 
   assert.ok(savedRide.fare);
-  assert.equal(savedRide.fare?.sharedRideDiscountPercent, 0);
-  assert.equal(savedRide.fare?.groupDiscountPercent, 20);
+  assert.equal(savedRide.fare?.sharedRideDiscountPercent, 20);
+  assert.equal(savedRide.fare?.groupDiscountPercent, 0);
   assert.equal(savedRide.fare?.passengerFare, estimate.passengerFare);
   assert.ok((savedRide.fare?.sharedDiscount ?? 0) > 0);
 
@@ -133,7 +133,7 @@ test("RedisStorage saves and retrieves a Shared ride with its complete group far
   // Confirm configuration survived a fresh read from Redis.
   const persistedConfig = await storage.getConfig();
 
-  assert.equal(persistedConfig.groupDiscountPercent, 20);
+  assert.equal(persistedConfig.sharedRideDiscountPercent, 20);
 
   console.log("Shared ride ID:", savedRide.id);
   console.log("Stored passenger count:", retrieved.passengerCount);

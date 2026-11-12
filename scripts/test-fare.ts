@@ -52,6 +52,8 @@ function fare(
 
 const subtotal = 20 + (10 * 12) + (10 * (3 / 1.609344) * 0.35);
 
+// ── Private pricing tests (vehicle-based fare) ──
+
 test("One passenger pays the normal vehicle fare", () => {
   const result = fare(10, 0, "private");
   close(result.totalFare, subtotal, "Solo private fare");
@@ -87,7 +89,7 @@ test("Four passengers pay exactly the same fare as one", () => {
 
 test("Additional passengers do not increase the fare", () => {
   const one = fare(10, 0, "private");
-  const four = fare(10, 7, "private"); // 8 total passengers (max)
+  const four = fare(10, 7, "private");
   close(four.totalFare, one.totalFare, "Max passengers still pay vehicle fare");
   close(four.passengerFare, 0, "No passenger fare regardless of count");
 });
@@ -164,85 +166,78 @@ test("Driver earnings are identical for 1, 2, 3, 4 passengers", () => {
   close(e4, e1, "Driver earnings same for 4 passengers");
 });
 
-// ── Shared pricing tests (preserved) ──
+// ── Shared pricing tests (discounted individual booking) ──
 
-test("Solo Shared booking pays normal fare without shared discount", () => {
+test("Shared booking uses a discounted individual fare", () => {
   const result = fare(10, 0, "shared");
-  close(result.totalFare, subtotal, "Solo shared fare");
-  close(result.sharedDiscount, 0, "Group discount");
-  assert.equal(result.sharedRideDiscountPercent, 0);
+  close(result.totalFare, subtotal * 0.85, "Shared discounted fare");
+  close(result.sharedDiscount, subtotal * 0.15, "Shared discount");
+  assert.equal(result.sharedRideDiscountPercent, 15);
   assert.equal(result.groupDiscountPercent, 0);
 });
 
-test("Shared passengers retain individual fare calculations", () => {
+test("Additional passengers do not multiply a Shared booking fare", () => {
   const result = fare(10, 2, "shared");
-  close(result.passengerFare, subtotal * 2, "Shared additional passenger fares");
-  close(result.sharedDiscount, subtotal * 3 * 0.2, "Shared group discount");
-  close(result.totalFare, subtotal * 3 * 0.8, "Shared group total");
-  assert.equal(result.groupDiscountPercent, 20);
+  close(result.passengerFare, 0, "No additional passenger fare");
+  close(result.sharedDiscount, subtotal * 0.15, "Shared discount");
+  close(result.totalFare, subtotal * 0.85, "Shared individual fare");
+  assert.equal(result.sharedRideDiscountPercent, 15);
+  assert.equal(result.groupDiscountPercent, 0);
 });
 
-test("Private and Shared group bookings use identical group pricing", () => {
-  // This test documents that Shared still uses group pricing,
-  // while Private no longer does.
+test("Private and Shared use separate pricing models", () => {
+  const privateResult = fare(10, 2, "private");
   const sharedResult = fare(10, 2, "shared");
-  close(sharedResult.totalFare, subtotal * 3 * 0.8, "Shared group total");
-  assert.equal(sharedResult.sharedRideDiscountPercent, 0);
+  close(privateResult.totalFare, subtotal, "Private vehicle fare");
+  close(sharedResult.totalFare, subtotal * 0.85, "Shared discounted fare");
 });
 
 test("Minimum fare is preserved for Shared short trips", () => {
   const result = fare(0, 0, "shared");
-  close(result.totalFare, 20, "Solo minimum fare");
-  close(result.sharedDiscount, 0, "Solo group discount");
+  close(result.totalFare, 20, "Shared minimum fare");
+  close(result.sharedDiscount, 0, "No discount below minimum fare");
 });
 
-test("Minimum fare is preserved after Shared group discount", () => {
-  const result = fare(0, 1, "shared", {
-    groupDiscountPercent: 90,
-  });
-  close(result.totalFare, 20, "Group minimum fare");
-});
-
-test("Surge pricing is applied after Shared group discount", () => {
+test("Surge pricing is applied after Shared discount", () => {
   const result = fare(10, 2, "shared", {
     surgePricing: true,
     surgeMultiplier: 1.5,
   });
-  close(result.totalFare, subtotal * 3 * 0.8 * 1.5, "Surge group total");
+  close(result.totalFare, subtotal * 0.85 * 1.5, "Shared total");
 });
 
-test("Configured group discount percentage is respected for Shared", () => {
+test("Configured Shared discount percentage is respected", () => {
   const result = fare(10, 1, "shared", {
-    groupDiscountPercent: 25,
+    sharedRideDiscountPercent: 25,
   });
-  close(result.totalFare, subtotal * 2 * 0.75, "25% group discount");
-  assert.equal(result.groupDiscountPercent, 25);
+  close(result.totalFare, subtotal * 0.75, "25% Shared discount");
+  assert.equal(result.sharedRideDiscountPercent, 25);
 });
 
-test("Group discount is capped at 90% for Shared", () => {
+test("Shared discount is capped at 90%", () => {
   const result = fare(30, 1, "shared", {
-    groupDiscountPercent: 120,
+    sharedRideDiscountPercent: 120,
   });
-  close(result.totalFare, (20 + 30 * 12 + 30 * (3 / 1.609344) * 0.35) * 2 * 0.1,
-    "Capped group fare");
-  assert.equal(result.groupDiscountPercent, 90);
+  close(result.totalFare, (20 + 30 * 12 + 30 * (3 / 1.609344) * 0.35) * 0.1,
+    "Capped Shared fare");
+  assert.equal(result.sharedRideDiscountPercent, 90);
 });
 
-test("Negative group discount is clamped to zero for Shared", () => {
+test("Negative Shared discount is clamped to zero", () => {
   const result = fare(10, 1, "shared", {
-    groupDiscountPercent: -10,
+    sharedRideDiscountPercent: -10,
   });
-  close(result.totalFare, subtotal * 2, "Zero-discount group fare");
-  assert.equal(result.groupDiscountPercent, 0);
+  close(result.totalFare, subtotal, "Zero-discount Shared fare");
+  assert.equal(result.sharedRideDiscountPercent, 0);
 });
 
-test("Additional passenger count is capped at seven for Shared", () => {
+test("Shared passenger count remains booking information, not a fare multiplier", () => {
   const result = fare(10, 10, "shared");
-  close(result.totalFare, subtotal * 8 * 0.8, "Maximum group fare");
-  close(result.passengerFare, subtotal * 7, "Maximum additional passenger fare");
+  close(result.totalFare, subtotal * 0.85, "Shared fare independent of party count");
+  close(result.passengerFare, 0, "No additional passenger fare");
 });
 
-test("Driver earnings and platform fee use the final Shared group fare", () => {
+test("Driver earnings and platform fee use the final Shared fare", () => {
   const result = fare(10, 2, "shared");
   close(result.driverEarnings, result.totalFare * 0.88, "Driver earnings");
   close(result.platformFee, result.totalFare * 0.12, "Platform fee");

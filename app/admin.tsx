@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, Pressable, StyleSheet, ScrollView, Platform,
+  View, Text, Pressable, StyleSheet, ScrollView, Platform, Image,
   ActivityIndicator, RefreshControl, TextInput, Switch
 } from 'react-native';
 import { router } from 'expo-router';
@@ -39,7 +39,7 @@ interface SafeUser {
   totalEarnings?: number;
 }
 
-type AdminTab = 'overview' | 'rides' | 'users' | 'settings';
+type AdminTab = 'overview' | 'rides' | 'payments' | 'users' | 'settings';
 
 export default function AdminScreen() {
   const insets = useSafeAreaInsets();
@@ -134,6 +134,26 @@ export default function AdminScreen() {
     }
   };
 
+  const verifyPayment = async (rideId: string, status: 'paid' | 'rejected') => {
+    if (!user?.id) return;
+    setActionLoading(`payment-${rideId}`);
+    try {
+      const baseUrl = getApiUrl();
+      const res = await fetch(new URL(`/api/admin/rides/${rideId}/payment`, baseUrl).toString(), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminId: user.id, status }),
+      });
+      if (!res.ok) throw new Error('Could not update payment');
+      const updated = await res.json();
+      setRides(prev => prev.map(r => r.id === rideId ? updated : r));
+    } catch (error: any) {
+      showAlert('Payment error', error.message || 'Could not update payment');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const updateConfig = async (updates: Partial<PlatformConfig>) => {
     try {
       const baseUrl = getApiUrl();
@@ -195,14 +215,14 @@ export default function AdminScreen() {
       </View>
 
       <View style={styles.tabBar}>
-        {(['overview', 'rides', 'users', 'settings'] as AdminTab[]).map(t => (
+        {(['overview', 'rides', 'payments', 'users', 'settings'] as AdminTab[]).map(t => (
           <Pressable
             key={t}
             style={[styles.tabItem, tab === t && styles.tabActive]}
             onPress={() => setTab(t)}
           >
             <Ionicons
-              name={t === 'overview' ? 'stats-chart' : t === 'rides' ? 'car' : t === 'users' ? 'people' : 'settings'}
+              name={t === 'overview' ? 'stats-chart' : t === 'rides' ? 'car' : t === 'payments' ? 'wallet' : t === 'users' ? 'people' : 'settings'}
               size={16}
               color={tab === t ? Colors.textWhite : Colors.textLight}
             />
@@ -216,9 +236,12 @@ export default function AdminScreen() {
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.accent} />}
       >
-        {tab === 'overview' && stats && <OverviewTab stats={stats} config={config} />}
+        {tab === 'overview' && stats && <OverviewTab stats={stats} config={config} rides={rides} />}
         {tab === 'rides' && (
-          <RidesTab rides={rides} statusColor={statusColor} cancelRide={cancelRide} actionLoading={actionLoading} />
+          <RidesTab rides={rides} statusColor={statusColor} cancelRide={cancelRide} verifyPayment={verifyPayment} actionLoading={actionLoading} />
+        )}
+        {tab === 'payments' && (
+          <PaymentsTab rides={rides} statusColor={statusColor} verifyPayment={verifyPayment} actionLoading={actionLoading} />
         )}
         {tab === 'users' && (
           <UsersTab users={users} suspendUser={suspendUser} deleteUser={deleteUser} actionLoading={actionLoading} />
@@ -232,8 +255,11 @@ export default function AdminScreen() {
   );
 }
 
-function OverviewTab({ stats, config }: { stats: Stats; config: PlatformConfig | null }) {
+function OverviewTab({ stats, config, rides }: { stats: Stats; config: PlatformConfig | null; rides: Ride[] }) {
   const driverShare = config?.driverSharePercent ?? 88;
+  const pendingPayments = rides.filter((ride) =>
+    ride.payment?.status === 'pending_verification' || ride.payment?.status === 'pending_cash'
+  ).length;
   return (
     <>
       <View style={styles.revenueCard}>
@@ -261,6 +287,7 @@ function OverviewTab({ stats, config }: { stats: Stats; config: PlatformConfig |
         <StatCard icon="close-circle" label="Cancelled" value={(stats.cancelledRides ?? 0).toString()} color={Colors.error} />
         <StatCard icon="ban" label="Suspended" value={(stats.suspendedUsers ?? 0).toString()} color="#FF453A" />
         <StatCard icon="list" label="Total" value={(stats.totalRides ?? 0).toString()} color={Colors.textLight} />
+        <StatCard icon="wallet" label="Payments to review" value={pendingPayments.toString()} color={Colors.accent} />
       </View>
 
       <View style={styles.compSection}>
@@ -286,47 +313,124 @@ function OverviewTab({ stats, config }: { stats: Stats; config: PlatformConfig |
   );
 }
 
-function RidesTab({ rides, statusColor, cancelRide, actionLoading }: {
+function PaymentsTab({ rides, statusColor, verifyPayment, actionLoading }: {
   rides: Ride[];
   statusColor: (s: string) => string;
-  cancelRide: (id: string) => void;
+  verifyPayment: (id: string, status: 'paid' | 'rejected') => void;
   actionLoading: string | null;
 }) {
-  const activeRides = rides.filter(r => !['completed', 'cancelled'].includes(r.status));
-  const pastRides = rides.filter(r => ['completed', 'cancelled'].includes(r.status));
+  const pending = rides.filter((ride) =>
+    ride.payment?.status === 'pending_verification' || ride.payment?.status === 'pending_cash'
+  );
 
   return (
     <>
-      {activeRides.length > 0 && (
-        <>
-          <Text style={styles.sectionTitle}>Active Rides ({activeRides.length})</Text>
-          {activeRides.map(ride => (
-            <RideCard key={ride.id} ride={ride} statusColor={statusColor} cancelRide={cancelRide} actionLoading={actionLoading} canCancel />
-          ))}
-        </>
-      )}
-
-      <Text style={[styles.sectionTitle, activeRides.length > 0 && { marginTop: 16 }]}>
-        All Rides ({rides.length})
+      <Text style={styles.sectionTitle}>Payment Review ({pending.length})</Text>
+      <Text style={styles.sectionHint}>
+        Verify mobile-money references and screenshots before marking them paid. Cash entries remain due to the driver.
       </Text>
-      {rides.length === 0 ? (
+      {pending.length === 0 ? (
         <View style={styles.emptyState}>
-          <Ionicons name="car-outline" size={36} color={Colors.textLight} />
-          <Text style={styles.emptyText}>No rides yet</Text>
+          <Ionicons name="checkmark-circle" size={36} color={Colors.success} />
+          <Text style={styles.emptyText}>No payments waiting for review</Text>
         </View>
       ) : (
-        rides.slice(0, 50).map(ride => (
-          <RideCard key={ride.id} ride={ride} statusColor={statusColor} cancelRide={cancelRide} actionLoading={actionLoading} canCancel={!['completed', 'cancelled'].includes(ride.status)} />
+        pending.map((ride) => (
+          <RideCard
+            key={ride.id}
+            ride={ride}
+            statusColor={statusColor}
+            cancelRide={() => undefined}
+            verifyPayment={verifyPayment}
+            actionLoading={actionLoading}
+            canCancel={false}
+          />
         ))
       )}
     </>
   );
 }
 
-function RideCard({ ride, statusColor, cancelRide, actionLoading, canCancel }: {
+function RidesTab({ rides, statusColor, cancelRide, verifyPayment, actionLoading }: {
+  rides: Ride[];
+  statusColor: (s: string) => string;
+  cancelRide: (id: string) => void;
+  verifyPayment: (id: string, status: 'paid' | 'rejected') => void;
+  actionLoading: string | null;
+}) {
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed' | 'cancelled'>('all');
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredRides = rides.filter((ride) => {
+    const matchesSearch = !normalizedSearch || [
+      ride.id,
+      ride.riderName,
+      ride.driverName,
+      ride.pickup.address,
+      ride.dropoff.address,
+      ride.payment?.transactionReference,
+    ].some((value) => value?.toLowerCase().includes(normalizedSearch));
+    const matchesStatus = statusFilter === 'all'
+      || (statusFilter === 'active' && !['completed', 'cancelled'].includes(ride.status))
+      || ride.status === statusFilter;
+    return matchesSearch && matchesStatus;
+  });
+  const activeRides = filteredRides.filter(r => !['completed', 'cancelled'].includes(r.status));
+
+  return (
+    <>
+      <TextInput
+        style={styles.adminSearchInput}
+        placeholder="Search rider, driver, route, or reference"
+        placeholderTextColor={Colors.textLight}
+        value={search}
+        onChangeText={setSearch}
+        autoCapitalize="none"
+      />
+      <View style={styles.filterRow}>
+        {(['all', 'active', 'completed', 'cancelled'] as const).map((filter) => (
+          <Pressable
+            key={filter}
+            style={[styles.filterChip, statusFilter === filter && styles.filterChipActive]}
+            onPress={() => setStatusFilter(filter)}
+          >
+            <Text style={[styles.filterChipText, statusFilter === filter && styles.filterChipTextActive]}>
+              {filter[0].toUpperCase() + filter.slice(1)}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      {activeRides.length > 0 && (
+        <>
+          <Text style={styles.sectionTitle}>Active Rides ({activeRides.length})</Text>
+          {activeRides.map(ride => (
+            <RideCard key={ride.id} ride={ride} statusColor={statusColor} cancelRide={cancelRide} verifyPayment={verifyPayment} actionLoading={actionLoading} canCancel />
+          ))}
+        </>
+      )}
+
+      <Text style={[styles.sectionTitle, activeRides.length > 0 && { marginTop: 16 }]}>
+        All Rides ({filteredRides.length})
+      </Text>
+      {filteredRides.length === 0 ? (
+        <View style={styles.emptyState}>
+          <Ionicons name="car-outline" size={36} color={Colors.textLight} />
+          <Text style={styles.emptyText}>No rides yet</Text>
+        </View>
+      ) : (
+        filteredRides.slice(0, 50).map(ride => (
+          <RideCard key={ride.id} ride={ride} statusColor={statusColor} cancelRide={cancelRide} verifyPayment={verifyPayment} actionLoading={actionLoading} canCancel={!['completed', 'cancelled'].includes(ride.status)} />
+        ))
+      )}
+    </>
+  );
+}
+
+function RideCard({ ride, statusColor, cancelRide, verifyPayment, actionLoading, canCancel }: {
   ride: Ride;
   statusColor: (s: string) => string;
   cancelRide: (id: string) => void;
+  verifyPayment: (id: string, status: 'paid' | 'rejected') => void;
   actionLoading: string | null;
   canCancel: boolean;
 }) {
@@ -373,6 +477,39 @@ function RideCard({ ride, statusColor, cancelRide, actionLoading, canCancel }: {
         </Text>
         <Text style={styles.rideMetaTime}>{new Date(ride.createdAt).toLocaleString()}</Text>
       </View>
+      {ride.payment && (
+        <View style={styles.paymentReviewBox}>
+          <View style={styles.paymentReviewHeader}>
+            <Text style={styles.paymentReviewTitle}>
+              {ride.payment.method.toUpperCase()} · {ride.payment.status.replace('_', ' ')}
+            </Text>
+            {ride.payment.transactionReference && (
+              <Text style={styles.paymentReference}>{ride.payment.transactionReference}</Text>
+            )}
+          </View>
+          {ride.payment.proofImage && (
+            <Image source={{ uri: ride.payment.proofImage }} style={styles.paymentProofImage} resizeMode="contain" />
+          )}
+          {ride.payment.status === 'pending_verification' && (
+            <View style={styles.paymentActions}>
+              <Pressable
+                style={styles.paymentApproveBtn}
+                onPress={() => verifyPayment(ride.id, 'paid')}
+                disabled={actionLoading === `payment-${ride.id}`}
+              >
+                <Text style={styles.paymentApproveText}>Mark paid</Text>
+              </Pressable>
+              <Pressable
+                style={styles.paymentRejectBtn}
+                onPress={() => verifyPayment(ride.id, 'rejected')}
+                disabled={actionLoading === `payment-${ride.id}`}
+              >
+                <Text style={styles.paymentRejectText}>Reject</Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      )}
       {ride.review && (
         <View style={styles.reviewBox}>
           <View style={styles.reviewBoxHeader}>
@@ -398,11 +535,23 @@ function UsersTab({ users, suspendUser, deleteUser, actionLoading }: {
   deleteUser: (id: string, name: string) => void;
   actionLoading: string | null;
 }) {
-  const drivers = users.filter(u => u.role === 'driver');
-  const riders = users.filter(u => u.role === 'rider');
+  const [search, setSearch] = useState('');
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredUsers = users.filter((u) => !normalizedSearch || [u.fullName, u.username, u.phone, u.role]
+    .some((value) => value.toLowerCase().includes(normalizedSearch)));
+  const drivers = filteredUsers.filter(u => u.role === 'driver');
+  const riders = filteredUsers.filter(u => u.role === 'rider');
 
   return (
     <>
+      <TextInput
+        style={styles.adminSearchInput}
+        placeholder="Search name, username, phone, or role"
+        placeholderTextColor={Colors.textLight}
+        value={search}
+        onChangeText={setSearch}
+        autoCapitalize="none"
+      />
       <Text style={styles.sectionTitle}>Drivers ({drivers.length})</Text>
       {drivers.map(u => (
         <UserCard key={u.id} user={u} suspendUser={suspendUser} deleteUser={deleteUser} actionLoading={actionLoading} />
@@ -773,6 +922,46 @@ const styles = StyleSheet.create({
     color: Colors.textWhite,
     marginBottom: 12,
   },
+  sectionHint: {
+    fontSize: 13,
+    lineHeight: 19,
+    fontFamily: 'Inter_400Regular',
+    color: Colors.textLight,
+    marginBottom: 14,
+  },
+  adminSearchInput: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    fontFamily: 'Inter_400Regular',
+    color: Colors.textWhite,
+    marginBottom: 10,
+  },
+  filterRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginBottom: 16,
+    flexWrap: 'wrap',
+  },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  filterChipActive: {
+    backgroundColor: Colors.primary,
+  },
+  filterChipText: {
+    fontSize: 12,
+    fontFamily: 'Inter_500Medium',
+    color: Colors.textLight,
+  },
+  filterChipTextActive: {
+    color: Colors.secondary,
+  },
   compSection: { marginBottom: 20 },
   compCard: {
     backgroundColor: 'rgba(255,255,255,0.05)',
@@ -876,6 +1065,66 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: 'Inter_400Regular',
     color: Colors.textLight,
+  },
+  paymentReviewBox: {
+    backgroundColor: 'rgba(54, 214, 197, 0.08)',
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 10,
+  },
+  paymentReviewHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  paymentReviewTitle: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: Colors.primary,
+    textTransform: 'capitalize' as const,
+  },
+  paymentReference: {
+    flex: 1,
+    fontSize: 11,
+    fontFamily: 'Inter_400Regular',
+    color: Colors.textLight,
+    textAlign: 'right',
+  },
+  paymentProofImage: {
+    width: '100%',
+    height: 120,
+    marginTop: 8,
+    borderRadius: 8,
+    backgroundColor: Colors.background,
+  },
+  paymentActions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+  },
+  paymentApproveBtn: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: Colors.primary,
+  },
+  paymentApproveText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: Colors.secondary,
+  },
+  paymentRejectBtn: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 59, 48, 0.15)',
+  },
+  paymentRejectText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: Colors.error,
   },
   reviewBox: {
     backgroundColor: 'rgba(255, 184, 0, 0.08)',

@@ -20,6 +20,8 @@ function RootLayoutNav() {
       <Stack.Screen name="register" />
       <Stack.Screen name="rider" />
       <Stack.Screen name="driver" />
+      <Stack.Screen name="driver-offers" />
+      <Stack.Screen name="driver-active" />
       <Stack.Screen name="admin" />
     </Stack>
   );

@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, Pressable, StyleSheet, Platform,
-  ActivityIndicator, Dimensions, ScrollView, Linking, TextInput,
+  ActivityIndicator, Dimensions, ScrollView, Linking,
 } from 'react-native';
 import { router } from 'expo-router';
 import MapView, {
   Marker,
+  Polyline,
   PROVIDER_DEFAULT,
   CartoTileLayer,
 } from '@/components/MapView';
@@ -20,13 +21,13 @@ import * as Haptics from 'expo-haptics';
 import type { Ride } from '@shared/schema';
 import { startIncomingRideAlert, stopIncomingRideAlert } from '@/lib/sound-notifications';
 import AppModal, { useAppModal } from '@/components/AppModal';
+import DriverTabBar from '@/components/DriverTabBar';
 
 const { width } = Dimensions.get('window');
 const LATITUDE_DELTA = 0.015;
 const LONGITUDE_DELTA = LATITUDE_DELTA * (width / Dimensions.get('window').height);
 
 type DriverPhase = 'dashboard' | 'online' | 'ride_request' | 'navigating' | 'arrived' | 'in_ride';
-type DriverRideOffer = Ride & { offerExpiresAt: number };
 
 export default function DriverScreen() {
   const insets = useSafeAreaInsets();
@@ -34,27 +35,18 @@ export default function DriverScreen() {
   const mapRef = useRef<MapView>(null);
   const alertedRideIdsRef = useRef<Set<string>>(new Set());
   const previousAvailableRideIdsRef = useRef<Set<string>>(new Set());
+  const activeRidesRef = useRef<Ride[]>([]);
 
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [permissionStatus, setPermissionStatus] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState(user?.isOnline || false);
   const [phase, setPhase] = useState<DriverPhase>('dashboard');
-  const [pendingRides, setPendingRides] = useState<DriverRideOffer[]>([]);
-  const [currentTime, setCurrentTime] = useState(Date.now());
-  const [activeRide, setActiveRide] = useState<Ride | null>(null);
+  const [pendingRides, setPendingRides] = useState<Ride[]>([]);
+  const [activeRides, setActiveRides] = useState<Ride[]>([]);
+  const [selectedRideId, setSelectedRideId] = useState<string | null>(null);
   const [earnings, setEarnings] = useState({ today: 0, total: user?.totalEarnings || 0, rides: user?.totalRides || 0 });
   const [rideHistory, setRideHistory] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(false);
-  const [vehicleEditorOpen, setVehicleEditorOpen] = useState(false);
-  const [savingVehicle, setSavingVehicle] = useState(false);
-  const [vehicleForm, setVehicleForm] = useState({
-    make: '',
-    model: '',
-    year: '',
-    color: '',
-    plate: '',
-    seatingCapacity: '',
-  });
   const { showAlert, showActionSheet, modalProps } = useAppModal();
 
   const topInset = Platform.OS === 'web' ? 67 : insets.top;
@@ -85,17 +77,19 @@ export default function DriverScreen() {
   }, [user?.id, isOnline]);
 
   useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     setEarnings({
       today: earnings.today,
       total: user?.totalEarnings || 0,
       rides: user?.totalRides || 0,
     });
   }, [user?.totalEarnings, user?.totalRides]);
+
+  useEffect(() => {
+    activeRidesRef.current = activeRides;
+    if (activeRides.some((ride) => ride.rideType !== 'shared')) {
+      stopIncomingRideAlert();
+    }
+  }, [activeRides]);
 
   useEffect(() => {
     if (location && user?.id) {
@@ -140,79 +134,9 @@ export default function DriverScreen() {
     } catch {}
   };
 
-  const openVehicleEditor = () => {
-    setVehicleForm({
-      make: user?.vehicleInfo?.make || '',
-      model: user?.vehicleInfo?.model || '',
-      year: user?.vehicleInfo?.year || '',
-      color: user?.vehicleInfo?.color || '',
-      plate: user?.vehicleInfo?.plate || '',
-      seatingCapacity: user?.vehicleInfo?.seatingCapacity?.toString() || '',
-    });
-    setVehicleEditorOpen(true);
-  };
-
-  const saveVehicle = async () => {
-    if (!user?.id) return;
-
-    const capacity = Number(vehicleForm.seatingCapacity);
-    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 8) {
-      showAlert(
-        'Invalid capacity',
-        'Enter between 1 and 8 passenger seats, excluding the driver.'
-      );
-      return;
-    }
-
-    const vehicleInfo = {
-      make: vehicleForm.make.trim(),
-      model: vehicleForm.model.trim(),
-      year: vehicleForm.year.trim(),
-      color: vehicleForm.color.trim(),
-      plate: vehicleForm.plate.trim(),
-      seatingCapacity: capacity,
-    };
-
-    if (
-      !vehicleInfo.make ||
-      !vehicleInfo.model ||
-      !vehicleInfo.year ||
-      !vehicleInfo.color ||
-      !vehicleInfo.plate
-    ) {
-      showAlert('Missing details', 'Please complete all vehicle fields.');
-      return;
-    }
-
-    setSavingVehicle(true);
-    try {
-      await apiRequest('PUT', `/api/user/${user.id}/vehicle`, { vehicleInfo });
-      await refreshUser();
-      setVehicleEditorOpen(false);
-      showAlert('Vehicle updated', 'Your vehicle details and passenger capacity have been saved.');
-    } catch (e: any) {
-      showAlert('Could not save vehicle', e?.message || 'Please try again.');
-    } finally {
-      setSavingVehicle(false);
-    }
-  };
-
   const toggleOnline = async () => {
     if (!user?.id) return;
     const newState = !isOnline;
-
-    if (newState) {
-      const capacity = Number(user.vehicleInfo?.seatingCapacity);
-      if (!Number.isInteger(capacity) || capacity < 1 || capacity > 8) {
-        openVehicleEditor();
-        showAlert(
-          'Vehicle details required',
-          'Add or update your vehicle and passenger seating capacity before going online.'
-        );
-        return;
-      }
-    }
-
     try {
       if (newState && location) {
         await apiRequest('PUT', `/api/user/${user.id}/location`, location);
@@ -230,33 +154,38 @@ export default function DriverScreen() {
       }
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     } catch (e: any) {
-      showAlert('Could not update status', e.message || 'Please try again.');
+      showAlert('Error', 'Could not update status');
     }
   };
 
   const fetchPendingRides = async () => {
-    if (!user?.id) return;
-
     try {
-      const res = await apiRequest(
-        'GET',
-        `/api/rides/driver/${user.id}/offers`
-      );
+      const baseUrl = getApiUrl();
+      const url = new URL('/api/rides/available', baseUrl);
+      const res = await fetch(url.toString(), { cache: 'no-store' });
       const data = await res.json();
-      const offers: DriverRideOffer[] = Array.isArray(data) ? data : [];
-      const validOffers = offers.filter(
-        offer => offer.offerExpiresAt > Date.now()
-      );
+      const rides = Array.isArray(data) ? data : [];
+      setPendingRides(rides);
 
-      setPendingRides(validOffers);
-
-      const availableIds = new Set(validOffers.map(offer => offer.id));
+      const availableIds = new Set(rides.map((ride: Ride) => ride.id));
       const hasNewRide = [...availableIds].some(
         rideId => !previousAvailableRideIdsRef.current.has(rideId)
       );
 
       alertedRideIdsRef.current = availableIds;
       previousAvailableRideIdsRef.current = availableIds;
+
+      const hasActivePrivateRide = activeRidesRef.current.some(
+        (ride) => ride.rideType !== 'shared'
+      );
+
+      // Drivers on a private ride must not be disturbed by new-request audio.
+      // The dispatch service also excludes them, but this client-side guard
+      // protects against stale requests already present in the polling result.
+      if (hasActivePrivateRide) {
+        stopIncomingRideAlert();
+        return;
+      }
 
       if (isOnline && hasNewRide) {
         startIncomingRideAlert();
@@ -274,17 +203,17 @@ export default function DriverScreen() {
       const baseUrl = getApiUrl();
       const url = new URL(`/api/rides/driver/${user.id}/active`, baseUrl);
       const res = await fetch(url.toString(), { cache: 'no-store' });
-      const data = await res.json();
-      if (data && data.id) {
-        setActiveRide(data);
-        setPendingRides([]);
-        alertedRideIdsRef.current.clear();
-        previousAvailableRideIdsRef.current.clear();
-        stopIncomingRideAlert();
-
-        if (data.status === 'accepted' || data.status === 'arriving') setPhase('navigating');
-        else if (data.status === 'arrived') setPhase('arrived');
-        else if (data.status === 'in_progress') setPhase('in_ride');
+      const data: Ride[] = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        setActiveRides(data);
+        const selected = data.find(ride => ride.id === selectedRideId) ?? data[0];
+        setSelectedRideId(selected.id);
+        if (selected.status === 'arriving' || selected.status === 'accepted') setPhase('navigating');
+        else if (selected.status === 'arrived') setPhase('arrived');
+        else if (selected.status === 'in_progress') setPhase('in_ride');
+      } else {
+        setActiveRides([]);
+        setSelectedRideId(null);
       }
     } catch {}
   };
@@ -317,8 +246,8 @@ export default function DriverScreen() {
 
       const res = await apiRequest('PUT', `/api/rides/${rideId}/accept`, { driverId: user.id });
       const ride = await res.json();
-      setPendingRides([]);
-      setActiveRide(ride);
+      setActiveRides(prev => [...prev, ride]);
+      setSelectedRideId(ride.id);
       setPhase('navigating');
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
@@ -331,36 +260,19 @@ export default function DriverScreen() {
     }
   };
 
-  const rejectRide = async (rideId: string) => {
-    if (!user?.id) return;
-
-    try {
-      await apiRequest('PUT', `/api/rides/${rideId}/reject`, {
-        driverId: user.id,
-      });
-
-      setPendingRides(previous => previous.filter(ride => ride.id !== rideId));
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      await fetchPendingRides();
-    } catch (e: any) {
-      showAlert('Offer unavailable', e.message || 'Could not reject this offer');
-      await fetchPendingRides();
-    }
-  };
-
-  const updateRideStatus = async (status: string) => {
-    if (!activeRide?.id) return;
+  const updateRideStatus = async (status: string, rideId: string = activeRides.find(r => r.id === selectedRideId)?.id || '') => {
     setLoading(true);
     try {
-      const res = await apiRequest('PUT', `/api/rides/${activeRide.id}/status`, { status });
+      const res = await apiRequest('PUT', `/api/rides/${rideId}/status`, { status });
       const updated = await res.json();
-      setActiveRide(updated);
+      setActiveRides(prev => prev.map(r => r.id === rideId ? updated : r));
 
       if (status === 'arrived') setPhase('arrived');
       else if (status === 'in_progress') setPhase('in_ride');
       else if (status === 'completed') {
         setPhase(isOnline ? 'online' : 'dashboard');
-        setActiveRide(null);
+        setActiveRides([]);
+        setSelectedRideId(null);
         fetchRideHistory();
         refreshUser();
         if (updated.fare) {
@@ -380,13 +292,30 @@ export default function DriverScreen() {
     }
   };
 
-  const openNavigationApp = (lat: number, lng: number, label: string) => {
-    const url = Platform.select({
-      ios: `maps:0,0?q=${label}@${lat},${lng}`,
-      android: `geo:${lat},${lng}?q=${lat},${lng}(${label})`,
-      default: `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`,
+  const openOptimizedActiveTripsRoute = () => {
+    if (activeRides.length === 0) return;
+
+    const stops = optimizeActiveTripStops(activeRides, location);
+    const destination = stops[stops.length - 1];
+    if (!destination) return;
+
+    const params = new URLSearchParams({
+      api: '1',
+      destination: `${destination.lat},${destination.lng}`,
+      travelmode: 'driving',
+      dir_action: 'navigate',
     });
-    if (url) Linking.openURL(url);
+
+    if (location) {
+      params.set('origin', `${location.lat},${location.lng}`);
+    }
+
+    const waypoints = stops.slice(0, -1);
+    if (waypoints.length > 0) {
+      params.set('waypoints', waypoints.map(stop => `${stop.lat},${stop.lng}`).join('|'));
+    }
+
+    Linking.openURL(`https://www.google.com/maps/dir/?${params.toString()}`);
   };
 
   if (permissionStatus === null) {
@@ -435,7 +364,7 @@ export default function DriverScreen() {
                     actions.push({ label: 'Admin Panel', icon: 'settings', iconColor: Colors.accent, onPress: () => router.replace('/admin') });
                   }
                   actions.push({ label: 'Switch to Rider', icon: 'person', onPress: () => router.replace('/rider') });
-                  actions.push({ label: 'Log Out', icon: 'log-out-outline', destructive: true, onPress: async () => { await logout(); router.replace('/'); } });
+                  actions.push({ label: 'Log Out', icon: 'log-out-outline', destructive: true, onPress: () => { logout(); router.replace('/'); } });
                   showActionSheet('Account', actions);
                 }}
               >
@@ -443,6 +372,8 @@ export default function DriverScreen() {
               </Pressable>
             </View>
           </View>
+
+          <DriverTabBar active="home" />
 
           <View style={styles.earningsCard}>
             <Text style={styles.earningsLabel}>Today&apos;s Earnings</Text>
@@ -473,106 +404,19 @@ export default function DriverScreen() {
             <Text style={styles.goOnlineBtnText}>Go Online</Text>
           </Pressable>
 
-          <View style={styles.vehicleSection}>
+          {user?.vehicleInfo && (
             <View style={styles.vehicleCard}>
               <Ionicons name="car" size={24} color={Colors.primary} />
               <View style={styles.vehicleInfo}>
                 <Text style={styles.vehicleTitle}>
-                  {user?.vehicleInfo
-                    ? `${user.vehicleInfo.year} ${user.vehicleInfo.make} ${user.vehicleInfo.model}`
-                    : 'Vehicle details required'}
+                  {user.vehicleInfo.year} {user.vehicleInfo.make} {user.vehicleInfo.model}
                 </Text>
                 <Text style={styles.vehicleSub}>
-                  {user?.vehicleInfo
-                    ? `${user.vehicleInfo.color} | ${user.vehicleInfo.plate}`
-                    : 'Add your vehicle before going online'}
-                </Text>
-                <Text style={styles.vehicleCapacity}>
-                  Passenger seats: {user?.vehicleInfo?.seatingCapacity || 'Not verified'}
-                  {user?.vehicleInfo?.seatingCapacity ? ' (excluding driver)' : ''}
+                  {user.vehicleInfo.color} | {user.vehicleInfo.plate}
                 </Text>
               </View>
-              <Pressable onPress={openVehicleEditor} style={styles.editVehicleBtn}>
-                <Ionicons name="create-outline" size={20} color={Colors.primary} />
-                <Text style={styles.editVehicleText}>
-                  {user?.vehicleInfo ? 'Edit' : 'Add'}
-                </Text>
-              </Pressable>
             </View>
-
-            {vehicleEditorOpen && (
-              <View style={styles.vehicleEditor}>
-                <Text style={styles.vehicleEditorTitle}>Vehicle information</Text>
-                <Text style={styles.vehicleEditorNote}>
-                  Passenger capacity excludes the driver. Enter the number of passenger seats.
-                </Text>
-
-                <TextInput
-                  style={styles.vehicleInput}
-                  placeholder="Vehicle make"
-                  placeholderTextColor={Colors.textLight}
-                  value={vehicleForm.make}
-                  onChangeText={value => setVehicleForm(f => ({ ...f, make: value }))}
-                />
-                <TextInput
-                  style={styles.vehicleInput}
-                  placeholder="Vehicle model"
-                  placeholderTextColor={Colors.textLight}
-                  value={vehicleForm.model}
-                  onChangeText={value => setVehicleForm(f => ({ ...f, model: value }))}
-                />
-                <TextInput
-                  style={styles.vehicleInput}
-                  placeholder="Year"
-                  placeholderTextColor={Colors.textLight}
-                  value={vehicleForm.year}
-                  onChangeText={value => setVehicleForm(f => ({ ...f, year: value }))}
-                />
-                <TextInput
-                  style={styles.vehicleInput}
-                  placeholder="Colour"
-                  placeholderTextColor={Colors.textLight}
-                  value={vehicleForm.color}
-                  onChangeText={value => setVehicleForm(f => ({ ...f, color: value }))}
-                />
-                <TextInput
-                  style={styles.vehicleInput}
-                  placeholder="Registration plate"
-                  placeholderTextColor={Colors.textLight}
-                  autoCapitalize="characters"
-                  value={vehicleForm.plate}
-                  onChangeText={value => setVehicleForm(f => ({ ...f, plate: value }))}
-                />
-                <TextInput
-                  style={styles.vehicleInput}
-                  placeholder="Passenger seats (1-8)"
-                  placeholderTextColor={Colors.textLight}
-                  keyboardType="number-pad"
-                  value={vehicleForm.seatingCapacity}
-                  onChangeText={value => setVehicleForm(f => ({ ...f, seatingCapacity: value }))}
-                />
-
-                <View style={styles.vehicleEditorActions}>
-                  <Pressable
-                    style={styles.vehicleCancelBtn}
-                    onPress={() => setVehicleEditorOpen(false)}
-                    disabled={savingVehicle}
-                  >
-                    <Text style={styles.vehicleCancelText}>Cancel</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.vehicleSaveBtn, savingVehicle && { opacity: 0.6 }]}
-                    onPress={saveVehicle}
-                    disabled={savingVehicle}
-                  >
-                    {savingVehicle
-                      ? <ActivityIndicator color={Colors.secondary} />
-                      : <Text style={styles.vehicleSaveText}>Save vehicle</Text>}
-                  </Pressable>
-                </View>
-              </View>
-            )}
-          </View>
+          )}
 
           {rideHistory.length > 0 && (
             <View style={styles.historySection}>
@@ -644,14 +488,22 @@ export default function DriverScreen() {
         >
           <CartoTileLayer />
 
-          {activeRide && (
-            <>
+          {activeRides.map(ride => (
+            <React.Fragment key={ride.id}>
+              <Polyline
+                coordinates={[
+                  { latitude: ride.pickup.lat, longitude: ride.pickup.lng },
+                  { latitude: ride.dropoff.lat, longitude: ride.dropoff.lng },
+                ]}
+                strokeColor={ride.id === selectedRideId ? Colors.primary : Colors.accent}
+                strokeWidth={ride.id === selectedRideId ? 5 : 3}
+              />
               <Marker
                 coordinate={{
-                  latitude: activeRide.pickup.lat,
-                  longitude: activeRide.pickup.lng,
+                  latitude: ride.pickup.lat,
+                  longitude: ride.pickup.lng,
                 }}
-                title="Pickup"
+                title={`${ride.riderName || 'Rider'} - ${ride.status}`}
               >
                 <View style={styles.pickupMarker}>
                   <Ionicons name="person" size={14} color={Colors.textWhite} />
@@ -659,8 +511,8 @@ export default function DriverScreen() {
               </Marker>
               <Marker
                 coordinate={{
-                  latitude: activeRide.dropoff.lat,
-                  longitude: activeRide.dropoff.lng,
+                  latitude: ride.dropoff.lat,
+                  longitude: ride.dropoff.lng,
                 }}
                 title="Drop-off"
               >
@@ -668,8 +520,8 @@ export default function DriverScreen() {
                   <Ionicons name="flag" size={14} color={Colors.textWhite} />
                 </View>
               </Marker>
-            </>
-          )}
+            </React.Fragment>
+          ))}
 
           {pendingRides.map(ride => (
             <Marker
@@ -715,127 +567,111 @@ export default function DriverScreen() {
           </Text>
         </Pressable>
 
-        {activeRide?.fare && (
+        {activeRides.find(r => r.id === selectedRideId)?.fare && (
           <View style={styles.earningChip}>
             <Ionicons name="cash" size={16} color={Colors.primary} />
-            <Text style={styles.earningChipText}>M{activeRide.fare.driverEarnings.toFixed(2)}</Text>
+            <Text style={styles.earningChipText}>M{activeRides.find(r => r.id === selectedRideId)!.fare!.driverEarnings.toFixed(2)}</Text>
           </View>
         )}
       </View>
 
-      {phase === 'online' && pendingRides.length > 0 && (
-        <Animated.View
-          entering={SlideInDown.duration(400)}
-          style={[styles.bottomCard, { paddingBottom: bottomInset + 12, maxHeight: '68%' }]}
-        >
-          <View style={styles.cardHandle} />
-          <View style={styles.offerHeader}>
-            <Text style={styles.cardTitle}>Ride Offers</Text>
-            <Text style={styles.offerCount}>{pendingRides.length}/5</Text>
+      <View style={[styles.driverTabs, { top: topInset + 56 }]}>
+        <DriverTabBar active="home" />
+      </View>
+
+      {activeRides.length > 0 && (
+        <View style={[styles.activeTripPanel, { top: topInset + 112 }]}>
+          <View style={styles.activeTripHeading}>
+            <Text style={styles.activeTripTitle}>Active trips</Text>
+            <Text style={styles.activeTripCount}>{activeRides.length}</Text>
+            <Pressable style={styles.optimizeRouteButton} onPress={openOptimizedActiveTripsRoute}>
+              <Ionicons name="navigate" size={15} color={Colors.secondary} />
+              <Text style={styles.optimizeRouteText}>Optimize route</Text>
+            </Pressable>
           </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.activeTripList}>
+            {activeRides.map(ride => (
+              <Pressable
+                key={ride.id}
+                style={[styles.activeTripCard, ride.id === selectedRideId && styles.activeTripCardSelected]}
+                onPress={() => {
+                  setSelectedRideId(ride.id);
+                  if (ride.status === 'arriving' || ride.status === 'accepted') setPhase('navigating');
+                  else if (ride.status === 'arrived') setPhase('arrived');
+                  else if (ride.status === 'in_progress') setPhase('in_ride');
+                }}
+              >
+                <View style={styles.activeTripCardHeader}>
+                  <Text style={styles.activeTripStatus}>{driverRideStatusLabel(ride.status)}</Text>
+                  <Text style={styles.activeTripPassengers}>{ride.passengerCount || 1} pax</Text>
+                </View>
+                <Text style={styles.activeTripPickup} numberOfLines={1}>{ride.pickup.address}</Text>
+                <View style={styles.activeTripRouteLine} />
+                <View style={styles.activeTripDestinationRow}>
+                  <Ionicons name="flag" size={14} color={Colors.warning} />
+                  <Text style={styles.activeTripDestination} numberOfLines={2}>{ride.dropoff.address}</Text>
+                </View>
+                <View style={styles.activeTripFooter}>
+                  <Text style={styles.activeTripEarnings}>M{ride.fare?.driverEarnings.toFixed(2) ?? '0.00'}</Text>
+                  <Pressable
+                    hitSlop={8}
+                    onPress={openOptimizedActiveTripsRoute}
+                  >
+                    <Ionicons name="navigate-circle" size={26} color={Colors.primary} />
+                  </Pressable>
+                </View>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      )}
 
-          <ScrollView
-            style={styles.offerList}
-            contentContainerStyle={styles.offerListContent}
-            showsVerticalScrollIndicator
-            nestedScrollEnabled
-          >
-            {pendingRides.map(ride => {
-              const secondsLeft = Math.max(
-                0,
-                Math.ceil((ride.offerExpiresAt - currentTime) / 1000)
-              );
+      {phase === 'online' && pendingRides.length > 0 && (
+        <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
+          <View style={styles.cardHandle} />
+          <Text style={styles.cardTitle}>Ride Request</Text>
 
-              return (
-                <View key={ride.id} style={styles.requestCard}>
-                  <View style={styles.offerTopRow}>
-                    <View style={[
-                      styles.rideTypeBadge,
-                      ride.rideType === 'shared' && styles.sharedRideBadge,
-                    ]}>
-                      <Text style={styles.rideTypeText}>
-                        {ride.rideType === 'shared' ? 'SHARED' : 'PRIVATE'}
-                      </Text>
-                    </View>
-                    <Text style={[
-                      styles.offerCountdown,
-                      secondsLeft <= 10 && styles.offerCountdownUrgent,
-                    ]}>
-                      <Ionicons name="timer-outline" size={13} /> {secondsLeft}s left
-                    </Text>
+          {pendingRides.slice(0, 1).map(ride => (
+            <View key={ride.id} style={styles.requestCard}>
+              <View style={styles.requestRoute}>
+                <View style={styles.routePoint}>
+                  <View style={styles.greenDot} />
+                  <Text style={styles.routeAddr} numberOfLines={1}>{ride.pickup.address}</Text>
+                </View>
+                <View style={styles.routeLine} />
+                <View style={styles.routePoint}>
+                  <View style={styles.orangeDot} />
+                  <Text style={styles.routeAddr} numberOfLines={1}>{ride.dropoff.address}</Text>
+                </View>
+              </View>
+              {ride.fare && (
+                <View style={styles.requestFare}>
+                  <View>
+                    <Text style={styles.requestFareLabel}>Your earnings</Text>
+                    <Text style={styles.requestFareAmount}>M{ride.fare.driverEarnings.toFixed(2)}</Text>
                   </View>
-
-                  <View style={styles.requestRoute}>
-                    <View style={styles.routePoint}>
-                      <View style={styles.greenDot} />
-                      <Text style={styles.routeAddr} numberOfLines={1}>{ride.pickup.address}</Text>
-                    </View>
-                    <View style={styles.routeLine} />
-                    <View style={styles.routePoint}>
-                      <View style={styles.orangeDot} />
-                      <Text style={styles.routeAddr} numberOfLines={1}>{ride.dropoff.address}</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.offerMetaRow}>
-                    <Text style={styles.offerMetaText}>
-                      <Ionicons name="people-outline" size={14} /> {ride.passengerCount || 1} passenger{(ride.passengerCount || 1) === 1 ? '' : 's'}
-                    </Text>
-                    <Text style={styles.offerMetaText}>
-                      <Ionicons name="navigate-outline" size={14} /> {Number(ride.distance || 0).toFixed(1)} km
-                    </Text>
-                  </View>
-
-                  <View style={styles.requestFare}>
-                    <View>
-                      <Text style={styles.requestFareLabel}>Your earnings</Text>
-                      <Text style={styles.requestFareAmount}>
-                        M{(ride.fare?.driverEarnings || 0).toFixed(2)}
-                      </Text>
-                    </View>
-                    <Text style={styles.offerFareTotal}>
-                      Fare M{(ride.fare?.totalFare || 0).toFixed(2)}
-                    </Text>
-                  </View>
-
-                  <View style={styles.offerActions}>
-                    <Pressable
-                      style={({ pressed }) => [
-                        styles.rejectBtn,
-                        pressed && styles.btnPressed,
-                        loading && styles.btnDisabled,
-                      ]}
-                      onPress={() => rejectRide(ride.id)}
-                      disabled={loading}
-                    >
-                      <Ionicons name="close" size={18} color={Colors.text} />
-                      <Text style={styles.rejectBtnText}>Reject</Text>
-                    </Pressable>
-
-                    <Pressable
-                      style={({ pressed }) => [
-                        styles.acceptBtn,
-                        styles.offerAcceptBtn,
-                        pressed && styles.btnPressed,
-                        loading && styles.btnDisabled,
-                      ]}
-                      onPress={() => acceptRide(ride.id)}
-                      disabled={loading || secondsLeft === 0}
-                    >
-                      {loading ? (
-                        <ActivityIndicator size="small" color={Colors.secondary} />
-                      ) : (
-                        <>
-                          <Ionicons name="checkmark" size={18} color={Colors.secondary} />
-                          <Text style={styles.acceptBtnText}>Accept</Text>
-                        </>
-                      )}
-                    </Pressable>
+                  <View>
+                    <Text style={styles.requestFareLabel}>Distance</Text>
+                    <Text style={styles.requestDistance}>{ride.distance} KM</Text>
                   </View>
                 </View>
-              );
-            })}
-          </ScrollView>
+              )}
+              <Pressable
+                style={({ pressed }) => [styles.acceptBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
+                onPress={() => acceptRide(ride.id)}
+                disabled={loading}
+              >
+                {loading ? (
+                  <ActivityIndicator size="small" color={Colors.secondary} />
+                ) : (
+                  <>
+                    <Ionicons name="checkmark" size={20} color={Colors.secondary} />
+                    <Text style={styles.acceptBtnText}>Accept Ride</Text>
+                  </>
+                )}
+              </Pressable>
+            </View>
+          ))}
         </Animated.View>
       )}
 
@@ -849,26 +685,29 @@ export default function DriverScreen() {
         </Animated.View>
       )}
 
-      {phase === 'navigating' && activeRide && (
+      {phase === 'navigating' && selectedRideId && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
           <View style={styles.rideStatusHeader}>
             <View style={[styles.statusIndicator, { backgroundColor: Colors.warning }]} />
             <Text style={styles.cardTitle}>Navigate to Pickup</Text>
           </View>
-          <Text style={styles.rideAddress} numberOfLines={2}>{activeRide.pickup.address}</Text>
+          <Text style={styles.rideAddress} numberOfLines={2}>{activeRides.find(r => r.id === selectedRideId)?.pickup.address}</Text>
 
           <View style={styles.actionRow}>
             <Pressable
               style={({ pressed }) => [styles.navBtn, pressed && styles.btnPressed]}
-              onPress={() => openNavigationApp(activeRide.pickup.lat, activeRide.pickup.lng, 'Pickup')}
+              onPress={() => {
+                const ride = activeRides.find(r => r.id === selectedRideId);
+                if (ride) openOptimizedActiveTripsRoute();
+              }}
             >
               <Ionicons name="navigate" size={20} color={Colors.textWhite} />
               <Text style={styles.navBtnText}>Navigate</Text>
             </Pressable>
             <Pressable
               style={({ pressed }) => [styles.arrivedBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
-              onPress={() => updateRideStatus('arrived')}
+              onPress={() => updateRideStatus('arrived', selectedRideId)}
               disabled={loading}
             >
               <Ionicons name="flag" size={20} color={Colors.secondary} />
@@ -878,7 +717,7 @@ export default function DriverScreen() {
         </Animated.View>
       )}
 
-      {phase === 'arrived' && activeRide && (
+      {phase === 'arrived' && selectedRideId && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
           <View style={styles.rideStatusHeader}>
@@ -886,11 +725,11 @@ export default function DriverScreen() {
             <Text style={styles.cardTitle}>Waiting for Rider</Text>
           </View>
           <Text style={styles.rideInfo}>
-            {activeRide.riderName || 'Rider'} has been notified of your arrival
+            {activeRides.find(r => r.id === selectedRideId)?.riderName || 'Rider'} has been notified of your arrival
           </Text>
           <Pressable
             style={({ pressed }) => [styles.startRideBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
-            onPress={() => updateRideStatus('in_progress')}
+            onPress={() => updateRideStatus('in_progress', selectedRideId)}
             disabled={loading}
           >
             <Ionicons name="car" size={20} color={Colors.secondary} />
@@ -899,7 +738,7 @@ export default function DriverScreen() {
         </Animated.View>
       )}
 
-      {phase === 'in_ride' && activeRide && (
+      {phase === 'in_ride' && selectedRideId && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
           <View style={styles.rideStatusHeader}>
@@ -909,13 +748,16 @@ export default function DriverScreen() {
 
           <View style={styles.rideDestination}>
             <Ionicons name="flag" size={18} color={Colors.accent} />
-            <Text style={styles.rideDestText} numberOfLines={2}>{activeRide.dropoff.address}</Text>
+            <Text style={styles.rideDestText} numberOfLines={2}>{activeRides.find(r => r.id === selectedRideId)?.dropoff.address}</Text>
           </View>
 
           <View style={styles.actionRow}>
             <Pressable
               style={({ pressed }) => [styles.navBtn, pressed && styles.btnPressed]}
-              onPress={() => openNavigationApp(activeRide.dropoff.lat, activeRide.dropoff.lng, 'Dropoff')}
+              onPress={() => {
+                const ride = activeRides.find(r => r.id === selectedRideId);
+                if (ride) openOptimizedActiveTripsRoute();
+              }}
             >
               <Ionicons name="navigate" size={20} color={Colors.textWhite} />
               <Text style={styles.navBtnText}>Navigate</Text>
@@ -930,10 +772,10 @@ export default function DriverScreen() {
             </Pressable>
           </View>
 
-          {activeRide.fare && (
+          {activeRides.find(r => r.id === selectedRideId)?.fare && (
             <View style={styles.rideEarnings}>
               <Text style={styles.rideEarningsLabel}>You&apos;ll earn</Text>
-              <Text style={styles.rideEarningsValue}>M{activeRide.fare.driverEarnings.toFixed(2)}</Text>
+              <Text style={styles.rideEarningsValue}>M{activeRides.find(r => r.id === selectedRideId)!.fare!.driverEarnings.toFixed(2)}</Text>
             </View>
           )}
         </Animated.View>
@@ -941,6 +783,71 @@ export default function DriverScreen() {
       <AppModal {...modalProps} />
     </View>
   );
+}
+
+type NavigationStop = {
+  lat: number;
+  lng: number;
+  rideId: string;
+  kind: 'pickup' | 'dropoff';
+};
+
+function optimizeActiveTripStops(
+  rides: Ride[],
+  location: { lat: number; lng: number } | null
+): NavigationStop[] {
+  const remaining = rides.map(ride => ({
+    ride,
+    pickedUp: ride.status === 'arrived' || ride.status === 'in_progress',
+  }));
+  const stops: NavigationStop[] = [];
+  let current = location ?? {
+    lat: rides[0].pickup.lat,
+    lng: rides[0].pickup.lng,
+  };
+
+  while (remaining.length > 0) {
+    let bestIndex = 0;
+    let bestStop: NavigationStop | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    remaining.forEach((entry, index) => {
+      const useDropoff = entry.pickedUp;
+      const point = useDropoff ? entry.ride.dropoff : entry.ride.pickup;
+      const distance = Math.pow(point.lat - current.lat, 2) + Math.pow(point.lng - current.lng, 2);
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+        bestStop = {
+          lat: point.lat,
+          lng: point.lng,
+          rideId: entry.ride.id,
+          kind: useDropoff ? 'dropoff' : 'pickup',
+        };
+      }
+    });
+
+    if (!bestStop) break;
+    const selectedStop = bestStop as NavigationStop;
+    stops.push(selectedStop);
+    current = { lat: selectedStop.lat, lng: selectedStop.lng };
+
+    if (selectedStop.kind === 'pickup') {
+      remaining[bestIndex].pickedUp = true;
+    } else {
+      remaining.splice(bestIndex, 1);
+    }
+  }
+
+  return stops;
+}
+
+function driverRideStatusLabel(status: Ride['status']): string {
+  if (status === 'in_progress') return 'In progress';
+  if (status === 'arriving') return 'Heading to pickup';
+  if (status === 'arrived') return 'At pickup';
+  return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 const styles = StyleSheet.create({
@@ -1015,55 +922,6 @@ const styles = StyleSheet.create({
     borderRadius: 16, padding: 16, marginBottom: 20,
   },
   vehicleInfo: { flex: 1 },
-  vehicleCapacity: {
-    fontSize: 12, fontFamily: 'Inter_600SemiBold',
-    color: Colors.primary, marginTop: 5,
-  },
-  editVehicleBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    padding: 8,
-  },
-  editVehicleText: {
-    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.primary,
-  },
-  vehicleSection: { marginBottom: 20 },
-  vehicleEditor: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 16, padding: 16, marginTop: 4,
-  },
-  vehicleEditorTitle: {
-    fontSize: 17, fontFamily: 'Inter_700Bold',
-    color: Colors.textWhite, marginBottom: 6,
-  },
-  vehicleEditorNote: {
-    fontSize: 12, fontFamily: 'Inter_400Regular',
-    color: Colors.textLight, marginBottom: 14, lineHeight: 18,
-  },
-  vehicleInput: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12,
-    color: Colors.textWhite, fontSize: 14, marginBottom: 10,
-  },
-  vehicleEditorActions: {
-    flexDirection: 'row', justifyContent: 'flex-end',
-    alignItems: 'center', gap: 10, marginTop: 6,
-  },
-  vehicleCancelBtn: {
-    paddingVertical: 12, paddingHorizontal: 16,
-    borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  vehicleCancelText: {
-    color: Colors.textWhite, fontFamily: 'Inter_600SemiBold',
-  },
-  vehicleSaveBtn: {
-    paddingVertical: 12, paddingHorizontal: 18,
-    borderRadius: 10, backgroundColor: Colors.primary,
-    minWidth: 120, alignItems: 'center',
-  },
-  vehicleSaveText: {
-    color: Colors.secondary, fontFamily: 'Inter_700Bold',
-  },
   vehicleTitle: {
     fontSize: 15, fontFamily: 'Inter_600SemiBold', color: Colors.textWhite,
   },
@@ -1117,6 +975,49 @@ const styles = StyleSheet.create({
   topBar: {
     position: 'absolute', left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', zIndex: 10,
   },
+  driverTabs: {
+    position: 'absolute', left: 12, right: 12, zIndex: 10,
+  },
+  activeTripPanel: {
+    position: 'absolute', left: 12, right: 12, zIndex: 9,
+  },
+  activeTripHeading: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6,
+  },
+  optimizeRouteButton: {
+    flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: 'auto',
+    backgroundColor: Colors.primary, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 10,
+  },
+  optimizeRouteText: {
+    fontSize: 11, fontFamily: 'Inter_700Bold', color: Colors.secondary,
+  },
+  activeTripTitle: {
+    fontSize: 14, fontFamily: 'Inter_700Bold', color: Colors.textWhite,
+  },
+  activeTripCount: {
+    minWidth: 20, textAlign: 'center', paddingHorizontal: 5, paddingVertical: 2,
+    borderRadius: 10, backgroundColor: Colors.primary, color: Colors.secondary,
+    fontSize: 11, fontFamily: 'Inter_700Bold',
+  },
+  activeTripList: { gap: 10 },
+  activeTripCard: {
+    width: 238, backgroundColor: 'rgba(16, 29, 50, 0.94)', borderRadius: 16,
+    padding: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
+  },
+  activeTripCardSelected: { borderColor: Colors.primary, borderWidth: 2 },
+  activeTripCardHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8,
+  },
+  activeTripStatus: { fontSize: 11, fontFamily: 'Inter_700Bold', color: Colors.primary },
+  activeTripPassengers: { fontSize: 11, fontFamily: 'Inter_500Medium', color: Colors.textLight },
+  activeTripPickup: { fontSize: 12, fontFamily: 'Inter_500Medium', color: Colors.textWhite },
+  activeTripRouteLine: { width: 1, height: 9, marginLeft: 4, backgroundColor: Colors.textLight },
+  activeTripDestinationRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
+  activeTripDestination: { flex: 1, fontSize: 12, fontFamily: 'Inter_600SemiBold', color: Colors.textWhite },
+  activeTripFooter: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8,
+  },
+  activeTripEarnings: { fontSize: 14, fontFamily: 'Inter_700Bold', color: Colors.primary },
   onlineToggle: {
     flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(52, 199, 89, 0.15)',
     paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, borderWidth: 1, borderColor: 'rgba(52, 199, 89, 0.3)',
@@ -1154,63 +1055,6 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     fontSize: 20, fontFamily: 'Inter_700Bold', color: Colors.text, marginBottom: 12,
-  },
-  offerHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-  },
-  offerCount: {
-    fontSize: 13, fontFamily: 'Inter_700Bold', color: Colors.primary,
-    backgroundColor: Colors.background, paddingHorizontal: 10, paddingVertical: 5,
-    borderRadius: 12, overflow: 'hidden',
-  },
-  offerList: {
-    flexGrow: 0,
-  },
-  offerListContent: {
-    gap: 12, paddingBottom: 8,
-  },
-  offerTopRow: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-  },
-  rideTypeBadge: {
-    backgroundColor: Colors.background, paddingHorizontal: 10, paddingVertical: 5,
-    borderRadius: 8,
-  },
-  sharedRideBadge: {
-    backgroundColor: '#D9F7F2',
-  },
-  rideTypeText: {
-    fontSize: 11, fontFamily: 'Inter_700Bold', color: Colors.primary,
-  },
-  offerCountdown: {
-    fontSize: 12, fontFamily: 'Inter_600SemiBold', color: Colors.primary,
-  },
-  offerCountdownUrgent: {
-    color: Colors.accent,
-  },
-  offerMetaRow: {
-    flexDirection: 'row', justifyContent: 'space-between',
-  },
-  offerMetaText: {
-    fontSize: 12, fontFamily: 'Inter_500Medium', color: Colors.textLight,
-  },
-  offerFareTotal: {
-    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.text,
-    alignSelf: 'center',
-  },
-  offerActions: {
-    flexDirection: 'row', gap: 10,
-  },
-  rejectBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 6, backgroundColor: Colors.background, paddingVertical: 13, borderRadius: 12,
-    borderWidth: 1, borderColor: Colors.border,
-  },
-  rejectBtnText: {
-    fontSize: 14, fontFamily: 'Inter_600SemiBold', color: Colors.text,
-  },
-  offerAcceptBtn: {
-    flex: 2, paddingVertical: 13,
   },
   requestCard: { gap: 14 },
   requestRoute: { gap: 4 },

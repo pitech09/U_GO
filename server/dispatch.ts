@@ -110,11 +110,14 @@ async function dispatchRideRound(
     storage.getAllRides(),
   ]);
 
+  // Drivers with active PRIVATE rides are excluded from receiving new offers.
+  // Active SHARED rides remain eligible for additional Shared offers.
   const driversWithActiveRides = new Set(
     allRides
       .filter(existingRide =>
         existingRide.driverId &&
-        ACTIVE_RIDE_STATUSES.has(existingRide.status)
+        ACTIVE_RIDE_STATUSES.has(existingRide.status) &&
+        existingRide.rideType === 'private'
       )
       .map(existingRide => existingRide.driverId as string)
   );
