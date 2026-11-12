@@ -237,7 +237,7 @@ export default function DriverOffersScreen() {
 
   if (loading) {
     return (
-      <View style={[styles.container, { paddingTop: topInset }]}> 
+      <View style={[styles.container, { paddingTop: topInset }]}>
         <View style={styles.header}>
           <Pressable style={styles.backBtn} onPress={goBackToDriverHome} accessibilityLabel="Back to driver home">
             <Ionicons name="chevron-back-outline" size={24} color={Colors.textLight} />
