@@ -986,7 +986,7 @@ export default function RiderScreen() {
             <ActivityIndicator size="large" color={Colors.primary} />
             <Text style={styles.waitingTitle}>Finding drivers for your ride</Text>
             <Text style={styles.waitingSubtitle}>
-              Drivers nearby are assessing your route. You'll be notified when a driver accepts.
+              Drivers nearby are assessing your route. You&apos;ll be notified when a driver accepts.
             </Text>
           </View>
 

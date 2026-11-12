@@ -7,7 +7,20 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
  */
 
 export function getApiUrl(): string {
-  const host = process.env.EXPO_PUBLIC_DOMAIN;
+  const configuredHost = process.env.EXPO_PUBLIC_DOMAIN;
+  const browserHost = typeof window !== "undefined" ? window.location.hostname : "";
+  const browserIsHosted =
+    browserHost !== "" &&
+    !/^(localhost|127(?:\.\d{1,3}){3}|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})$/i.test(browserHost);
+
+  // Expo's web export can carry the local .env value into production. In a
+  // hosted browser, a local API host points back to the user's own machine;
+  // use the same origin so /api/rides reaches the deployed server instead.
+  const host =
+    browserIsHosted &&
+    (!configuredHost || /^(https?:\/\/)?(localhost|127(?:\.\d{1,3}){3})(?::\d+)?$/i.test(configuredHost))
+      ? window.location.origin
+      : configuredHost;
 
   if (!host) {
     throw new Error("EXPO_PUBLIC_DOMAIN is not set");
