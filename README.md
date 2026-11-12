@@ -185,10 +185,10 @@ Fares are computed from a configurable model (editable live in **Admin → Setti
 
 | Parameter | Default |
 |-----------|---------|
-| Base fare | $2.50 |
-| Per mile | $1.75 |
-| Per minute | $0.35 |
-| Minimum fare | $5.00 |
+| Base fare | M2.50 |
+| Per km | M1.75 |
+| Per minute | M0.35 |
+| Minimum fare | M5.00 |
 | **Driver share** | **82%** |
 | Surge pricing | Toggle |
 

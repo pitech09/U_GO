@@ -6,11 +6,13 @@ import {
 import { router } from 'expo-router';
 import MapView, {
   Marker,
+  Polyline,
   PROVIDER_DEFAULT,
   CartoTileLayer,
 } from '@/components/MapView';
 import AppModal, { useAppModal } from '@/components/AppModal';
 import * as Location from 'expo-location';
+import * as ImagePicker from 'expo-image-picker';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '@/lib/auth-context';
@@ -19,6 +21,7 @@ import Colors from '@/constants/colors';
 import Animated, { FadeInDown, FadeInUp, SlideInDown, FadeIn } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import type { Ride, User } from '@shared/schema';
+import { calculateDistance } from '@shared/distance';
 import { playRideUpdateSound } from '@/lib/sound-notifications';
 
 const { width, height } = Dimensions.get('window');
@@ -52,6 +55,19 @@ export default function RiderScreen() {
   const [fareEstimate, setFareEstimate] = useState<any>(null);
   const [activeRide, setActiveRide] = useState<Ride | null>(null);
   const [driverInfo, setDriverInfo] = useState<any>(null);
+  const [driverEtaMinutes, setDriverEtaMinutes] = useState<number | null>(null);
+  const [offers, setOffers] = useState<Array<{
+    rideId: string;
+    ride: Ride;
+    driverId: string;
+    offer: {
+      driverId: string;
+      rideId: string;
+      createdAt: number;
+      expiresAt: number;
+      status: 'pending' | 'expired';
+    };
+  }>>([]);
   const [loading, setLoading] = useState(false);
   const [addressInput, setAddressInput] = useState('');
   const [addressSearching, setAddressSearching] = useState(false);
@@ -61,6 +77,12 @@ export default function RiderScreen() {
   const [reviewComment, setReviewComment] = useState('');
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
   const [reviewSubmitted, setReviewSubmitted] = useState(false);
+  const [rideType, setRideType] = useState<'private' | 'shared'>('private');
+  const [additionalPassengers, setAdditionalPassengers] = useState(0);
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'mpesa' | 'ecocash'>('cash');
+  const [paymentReference, setPaymentReference] = useState('');
+  const [paymentProofImage, setPaymentProofImage] = useState<string | null>(null);
+  const [paymentSubmitting, setPaymentSubmitting] = useState(false);
 
   const phaseRef = useRef<RiderPhase>(phase);
   const activeRideRef = useRef<Ride | null>(activeRide);
@@ -193,7 +215,17 @@ export default function RiderScreen() {
           setPhase('riding');
           if (data.driverId) fetchDriverInfo(data.driverId);
         }
-        else if (data.status === 'completed') setPhase('completed');
+        else if (data.status === 'completed') {
+          if (data.review) {
+            setReviewSubmitted(true);
+            setActiveRide(null);
+            setDriverInfo(null);
+            setPhase('idle');
+          } else {
+            setReviewSubmitted(false);
+            setPhase('completed');
+          }
+        }
       } else {
         const currentPhase = phaseRef.current;
         const currentRide = activeRideRef.current;
@@ -208,6 +240,36 @@ export default function RiderScreen() {
       }
     } catch {}
   };
+
+  useEffect(() => {
+    if (phase === 'waiting' && activeRide?.id) {
+      const fetchData = async () => {
+        if (!user?.id) return;
+        try {
+          const res = await fetch(
+            `/api/rides/rider/${user.id}/offers?rideId=${activeRide.id}`,
+            { cache: 'no-store' }
+          );
+          if (res.ok) {
+            const data: Array<{
+              rideId: string;
+              ride: Ride;
+              driverId: string;
+              offer: {
+                driverId: string;
+                rideId: string;
+                createdAt: number;
+                expiresAt: number;
+                status: 'pending' | 'expired';
+              };
+            }> = await res.json();
+            setOffers(data);
+          }
+        } catch {}
+      };
+      fetchData();
+    }
+  }, [phase]);
 
   const pollUserEvents = async () => {
     if (!user?.id) return;
@@ -254,6 +316,40 @@ export default function RiderScreen() {
       setDriverInfo(data);
     } catch {}
   };
+
+  const activeDriverPosition = driverInfo?.currentLocation
+    || nearbyDrivers.find((driver) => driver.id === activeRide?.driverId)?.currentLocation
+    || null;
+
+  useEffect(() => {
+    if (!activeRide || !activeDriverPosition || activeRide.status === 'arrived') {
+      setDriverEtaMinutes(null);
+      return;
+    }
+
+    const destination = activeRide.status === 'in_progress'
+      ? activeRide.dropoff
+      : activeRide.pickup;
+    const distanceKm = calculateDistance(
+      activeDriverPosition.lat,
+      activeDriverPosition.lng,
+      destination.lat,
+      destination.lng,
+    );
+
+    // Keep the ETA consistent with the fare model's average urban speed.
+    setDriverEtaMinutes(Math.max(1, Math.ceil(distanceKm * (3 / 1.609344))));
+  }, [activeRide?.id, activeRide?.status, activeRide?.pickup, activeRide?.dropoff, activeDriverPosition?.lat, activeDriverPosition?.lng]);
+
+  const activeRideRouteCoordinates = activeRide && activeDriverPosition
+    ? [
+        { latitude: activeDriverPosition.lat, longitude: activeDriverPosition.lng },
+        ...(activeRide.status === 'in_progress'
+          ? []
+          : [{ latitude: activeRide.pickup.lat, longitude: activeRide.pickup.lng }]),
+        { latitude: activeRide.dropoff.lat, longitude: activeRide.dropoff.lng },
+      ]
+    : null;
 
   const handleMapPress = (e: any) => {
     if (phase !== 'selecting_dropoff') return;
@@ -371,10 +467,17 @@ export default function RiderScreen() {
     try {
       const baseUrl = getApiUrl();
       const url = new URL(
-        `/api/fare/estimate?pLat=${location.lat}&pLng=${location.lng}&dLat=${dropoffCoord.lat}&dLng=${dropoffCoord.lng}`,
+        `/api/fare/estimate?pLat=${location.lat}&pLng=${location.lng}&dLat=${dropoffCoord.lat}&dLng=${dropoffCoord.lng}&rideType=${rideType}&additionalPassengers=${additionalPassengers}`,
         baseUrl
       );
       const res = await fetch(url.toString());
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ message: res.statusText }));
+        setFareEstimate(null);
+        setPhase('selecting_dropoff');
+        showAlert('Fare Error', body.message ?? `Request failed with status ${res.status}`);
+        return;
+      }
       const data = await res.json();
       setFareEstimate(data);
       setPhase('confirming');
@@ -394,6 +497,8 @@ export default function RiderScreen() {
         riderId: user.id,
         pickup: { lat: location.lat, lng: location.lng, address: pickupAddress },
         dropoff: { lat: dropoffCoord.lat, lng: dropoffCoord.lng, address: dropoffAddress },
+        rideType,
+        additionalPassengers,
       });
       const ride = await res.json();
       setActiveRide(ride);
@@ -403,6 +508,61 @@ export default function RiderScreen() {
       showAlert('Error', e.message || 'Could not request ride');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const submitRidePayment = async () => {
+    if (!activeRide?.id || !user?.id) return;
+    if (paymentMethod !== 'cash' && !paymentReference.trim()) {
+      showAlert('Payment reference required', 'Enter the M-Pesa or EcoCash transaction number after paying.');
+      return;
+    }
+
+    setPaymentSubmitting(true);
+    try {
+      const updated = await apiRequest('PUT', `/api/rides/${activeRide.id}/payment`, {
+        riderId: user.id,
+        paymentMethod,
+        paymentReference: paymentReference.trim() || undefined,
+        paymentProofImage: paymentProofImage || undefined,
+      });
+      setActiveRide(await updated.json());
+      showAlert(
+        paymentMethod === 'cash' ? 'Cash payment recorded' : 'Payment submitted',
+        paymentMethod === 'cash'
+          ? 'Please pay the driver directly before ending the ride.'
+          : 'Your payment is pending verification. Keep the transaction reference for your records.',
+      );
+    } catch (e: any) {
+      const message = e.message || '';
+      showAlert(
+        'Payment error',
+        message.includes('413') || message.toLowerCase().includes('entity too large')
+          ? 'The payment screenshot is too large. Choose a smaller screenshot and try again.'
+          : message || 'Could not submit payment',
+      );
+    } finally {
+      setPaymentSubmitting(false);
+    }
+  };
+
+  const choosePaymentProof = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      quality: 0.3,
+      base64: true,
+    });
+    if (!result.canceled && result.assets[0]?.base64) {
+      const asset = result.assets[0];
+      const encoded = `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}`;
+      // Base64 expands the original image by roughly one third. Keep the
+      // complete JSON request comfortably below Express's body limit.
+      if ((asset.fileSize && asset.fileSize > 2_000_000) || encoded.length > 4_000_000) {
+        showAlert('Screenshot too large', 'Please choose a screenshot smaller than 2 MB and try again.');
+        return;
+      }
+      setPaymentProofImage(encoded);
     }
   };
 
@@ -442,13 +602,28 @@ export default function RiderScreen() {
     try {
       const baseUrl = getApiUrl();
       const url = new URL(`/api/rides/${activeRide.id}/review`, baseUrl);
-      await fetch(url.toString(), {
+      const response = await fetch(url.toString(), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating: reviewRating, comment: reviewComment.trim() || undefined }),
       });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ message: 'Failed to submit review' }));
+        throw new Error(body.message || 'Failed to submit review');
+      }
+
+      const reviewedRide = await response.json() as Ride;
+      setActiveRide(reviewedRide);
       setReviewSubmitted(true);
       if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      // Close the completed screen after a brief moment so the rating window
+      // does not reappear due to polling or re-mounts.
+      setTimeout(() => {
+        setPhase('idle');
+        setActiveRide(null);
+        setDriverInfo(null);
+      }, 2000);
     } catch {
       showAlert('Error', 'Failed to submit review. Please try again.');
     } finally {
@@ -523,7 +698,7 @@ export default function RiderScreen() {
         >
           <CartoTileLayer />
 
-          {nearbyDrivers.map((driver) => (
+          {nearbyDrivers.filter((driver) => driver.id !== activeRide?.driverId).map((driver) => (
             <Marker
               key={driver.id}
               coordinate={{
@@ -538,6 +713,58 @@ export default function RiderScreen() {
               </View>
             </Marker>
           ))}
+
+          {activeRide && activeDriverPosition && activeRideRouteCoordinates && (
+            <>
+              <Polyline
+                coordinates={activeRideRouteCoordinates}
+                strokeColor={Colors.primary}
+                strokeWidth={5}
+              />
+              {activeRide.status !== 'in_progress' && (
+                <Marker
+                  coordinate={{
+                    latitude: activeRide.pickup.lat,
+                    longitude: activeRide.pickup.lng,
+                  }}
+                  title="Pickup"
+                >
+                  <View style={styles.pickupMarker}>
+                    <Ionicons name="person" size={15} color={Colors.textWhite} />
+                  </View>
+                </Marker>
+              )}
+              <Marker
+                coordinate={{
+                  latitude: activeRide.dropoff.lat,
+                  longitude: activeRide.dropoff.lng,
+                }}
+                title="Destination"
+              >
+                <View style={styles.dropoffMarker}>
+                  <Ionicons name="flag" size={16} color={Colors.textWhite} />
+                </View>
+              </Marker>
+              <Marker
+                coordinate={{
+                  latitude: activeDriverPosition.lat,
+                  longitude: activeDriverPosition.lng,
+                }}
+                title={driverInfo?.fullName || 'Your driver'}
+                description={
+                  activeRide.status === 'arrived'
+                    ? 'Driver has arrived'
+                    : driverEtaMinutes
+                      ? `${driverEtaMinutes} min away`
+                      : 'Updating driver location'
+                }
+              >
+                <View style={styles.activeDriverMarker}>
+                  <Ionicons name="car" size={17} color={Colors.textWhite} />
+                </View>
+              </Marker>
+            </>
+          )}
 
           {dropoffCoord && (
             <Marker
@@ -698,6 +925,50 @@ export default function RiderScreen() {
                   )}
                 </Pressable>
               </View>
+
+              <View style={styles.rideTypeRow}>
+                <Pressable
+                  style={[styles.rideTypeBtn, rideType === 'private' && styles.rideTypeBtnActive]}
+                  onPress={() => setRideType('private')}
+                >
+                  <Ionicons name="car" size={18} color={rideType === 'private' ? Colors.secondary : Colors.textLight} />
+                  <Text style={[styles.rideTypeLabel, rideType === 'private' && styles.rideTypeLabelActive]}>Private</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.rideTypeBtn, rideType === 'shared' && styles.rideTypeBtnActive]}
+                  onPress={() => setRideType('shared')}
+                >
+                  <Ionicons name="people" size={18} color={rideType === 'shared' ? Colors.secondary : Colors.textLight} />
+                  <Text style={[styles.rideTypeLabel, rideType === 'shared' && styles.rideTypeLabelActive]}>Shared</Text>
+                </Pressable>
+              </View>
+
+              {rideType === 'private' && additionalPassengers > 0 && (
+                <View style={styles.passengerRow}>
+                  <Text style={styles.passengerLabel}>Total passengers:</Text>
+                  <Text style={styles.passengerValue}>{1 + additionalPassengers}</Text>
+                </View>
+              )}
+
+              {rideType === 'private' && (
+                <View style={styles.passengerControls}>
+                  <Pressable
+                    style={styles.passengerBtn}
+                    onPress={() => setAdditionalPassengers(Math.max(0, additionalPassengers - 1))}
+                    disabled={additionalPassengers === 0}
+                  >
+                    <Ionicons name="remove" size={20} color={additionalPassengers === 0 ? Colors.textLight : Colors.secondary} />
+                  </Pressable>
+                  <Text style={styles.passengerCountText}>{1 + additionalPassengers}</Text>
+                  <Pressable
+                    style={styles.passengerBtn}
+                    onPress={() => setAdditionalPassengers(Math.min(7, additionalPassengers + 1))}
+                    disabled={additionalPassengers === 7}
+                  >
+                    <Ionicons name="add" size={20} color={additionalPassengers === 7 ? Colors.textLight : Colors.secondary} />
+                  </Pressable>
+                </View>
+              )}
             </>
           ) : (
             <View style={styles.tapHint}>
@@ -722,7 +993,7 @@ export default function RiderScreen() {
               <FareRow label="Base fare" value={`M${fareEstimate.baseFare.toFixed(2)}`} />
               <FareRow label={`Distance (${fareEstimate.distance} KM)`} value={`M${fareEstimate.distanceFare.toFixed(2)}`} />
               <FareRow label={`Time (~${fareEstimate.duration} min)`} value={`M${fareEstimate.timeFare.toFixed(2)}`} />
-              </View>
+            </View>
           </View>
 
           <View style={styles.btnRow}>
@@ -753,11 +1024,87 @@ export default function RiderScreen() {
       {phase === 'waiting' && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
-          <View style={styles.waitingContent}>
-            <ActivityIndicator size="large" color={Colors.primary} />
-            <Text style={styles.waitingTitle}>Finding your driver...</Text>
-            <Text style={styles.waitingSubtitle}>Looking for nearby available drivers</Text>
-          </View>
+          <Text style={styles.cardTitle}>Waiting for drivers</Text>
+
+          {offers.length > 0 && (
+            <View style={styles.offersContainer}>
+              {offers.map((offer) => (
+                <View key={offer.driverId} style={styles.offerCard}>
+                  <View style={styles.offerHeader}>
+                    <Text style={styles.offerDriverName}>{offer.ride.riderName}</Text>
+                    <Text style={styles.offerRating}>Driver offer</Text>
+                  </View>
+                  <View style={styles.offerMeta}>
+                    <Text style={styles.offerSeats}>
+                      {offer.ride.passengerCount} passengers
+                    </Text>
+                    <Text style={styles.offerSeats}>
+                      {offer.offer.expiresAt > Date.now() ? 'Active' : 'Expired'}
+                    </Text>
+                  </View>
+                  <View style={styles.offerFareRow}>
+                    <Text style={styles.offerFareLabel}>Fare</Text>
+                    <Text style={styles.offerFarePrice}>
+                      M{offer.ride.fare?.totalFare?.toFixed(2) ?? '0.00'}
+                    </Text>
+                  </View>
+                  <View style={styles.offerActions}>
+                    <Pressable
+                      style={({ pressed }) => [styles.acceptBtn, pressed && styles.btnPressed]}
+                      onPress={async () => {
+                        try {
+                          await apiRequest('PUT', `/api/rides/${offer.ride.id}/accept`, {
+                            driverId: offer.driverId,
+                          });
+                          setActiveRide(offer.ride);
+                          setPhase('matched');
+                          if (offer.driverId) fetchDriverInfo(offer.driverId);
+                        } catch (e: any) {
+                          showAlert('Error', e.message || 'Could not accept offer');
+                        }
+                      }}
+                    >
+                      <Ionicons name="caret-forward-sharp" size={16} color={Colors.background} />
+                      <Text style={styles.acceptBtnText}>Accept</Text>
+                    </Pressable>
+                    <Pressable
+                      style={({ pressed }) => [styles.rejectBtn, pressed && styles.btnPressed]}
+                      onPress={async () => {
+                        try {
+                          await apiRequest('PUT', `/api/rides/${offer.ride.id}/reject`, {
+                            driverId: offer.driverId,
+                          });
+                          const remaining = offers.filter(
+                            o => o.driverId !== offer.driverId
+                          );
+                          setOffers(remaining);
+                          if (remaining.length === 0) {
+                            setOffers([]);
+                          }
+                        } catch (e: any) {
+                          showAlert('Error', e.message || 'Could not reject offer');
+                        }
+                      }}
+                    >
+                      <Ionicons name="close-sharp" size={16} color={Colors.error} />
+                      <Text style={styles.rejectBtnText}>Reject</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {offers.length === 0 && (
+            <View style={styles.waitingContent}>
+              <ActivityIndicator size="large" color={Colors.primary} />
+              <Text style={styles.waitingTitle}>Finding drivers for your ride</Text>
+              <Text style={styles.waitingSubtitle}>
+                Drivers nearby are assessing your route. You'll be notified when an offer arrives.
+              </Text>
+            </View>
+          )}
+
           <Pressable
             style={({ pressed }) => [styles.cancelRideBtn, pressed && styles.btnPressed]}
             onPress={handleCancelRide}
@@ -781,6 +1128,20 @@ export default function RiderScreen() {
             </Text>
           </View>
 
+          <View style={styles.etaRow}>
+            <Ionicons name="time-outline" size={19} color={Colors.primary} />
+            <Text style={styles.etaLabel}>
+              {activeRide.status === 'in_progress' ? 'Destination ETA' : 'Driver ETA'}
+            </Text>
+            <Text style={styles.etaValue}>
+              {activeRide.status === 'arrived'
+                ? 'Arrived'
+                : driverEtaMinutes
+                  ? `${driverEtaMinutes} min`
+                  : 'Updating...'}
+            </Text>
+          </View>
+
           {driverInfo && (
             <View style={styles.driverCard}>
               <View style={styles.driverAvatar}>
@@ -801,6 +1162,67 @@ export default function RiderScreen() {
                   <Text style={styles.driverPlate}>{driverInfo.vehicleInfo.plate}</Text>
                 )}
               </View>
+            </View>
+          )}
+
+          {activeRide.status === 'in_progress' && !activeRide.payment && (
+            <View style={styles.ridePaymentCard}>
+              <View style={styles.ridePaymentHeader}>
+                <Text style={styles.ridePaymentTitle}>Pay for this ride</Text>
+                <Text style={styles.ridePaymentAmount}>M{activeRide.fare?.totalFare.toFixed(2) ?? '0.00'}</Text>
+              </View>
+              <View style={styles.paymentMethodRow}>
+                {([
+                  ['cash', 'cash-outline', 'Cash'],
+                  ['mpesa', 'phone-portrait-outline', 'M-Pesa'],
+                  ['ecocash', 'wallet-outline', 'EcoCash'],
+                ] as const).map(([method, icon, label]) => (
+                  <Pressable
+                    key={method}
+                    style={[styles.paymentMethodBtn, paymentMethod === method && styles.paymentMethodBtnActive]}
+                    onPress={() => setPaymentMethod(method)}
+                  >
+                    <Ionicons name={icon} size={17} color={paymentMethod === method ? Colors.secondary : Colors.textLight} />
+                    <Text style={[styles.paymentMethodText, paymentMethod === method && styles.paymentMethodTextActive]}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              {paymentMethod === 'cash' ? (
+                <Text style={styles.paymentHint}>Pay the driver directly before ending the ride.</Text>
+              ) : (
+                <>
+                  <Text style={styles.paymentHint}>Pay the U-GO merchant account, then enter the transaction number. Never enter your wallet PIN here.</Text>
+                  <TextInput
+                    style={styles.paymentReferenceInput}
+                    placeholder="Transaction number"
+                    placeholderTextColor={Colors.textLight}
+                    value={paymentReference}
+                    onChangeText={setPaymentReference}
+                    autoCapitalize="characters"
+                    maxLength={80}
+                  />
+                  <Pressable style={styles.proofButton} onPress={choosePaymentProof}>
+                    <Ionicons name={paymentProofImage ? 'checkmark-circle' : 'camera-outline'} size={18} color={Colors.primary} />
+                    <Text style={styles.proofButtonText}>{paymentProofImage ? 'Screenshot attached' : 'Attach payment screenshot (optional)'}</Text>
+                  </Pressable>
+                </>
+              )}
+              <Pressable
+                style={({ pressed }) => [styles.submitPaymentBtn, pressed && styles.btnPressed, paymentSubmitting && styles.btnDisabled]}
+                onPress={submitRidePayment}
+                disabled={paymentSubmitting}
+              >
+                {paymentSubmitting ? <ActivityIndicator size="small" color={Colors.secondary} /> : <Text style={styles.submitPaymentText}>{paymentMethod === 'cash' ? 'Record cash payment' : 'Submit payment'}</Text>}
+              </Pressable>
+            </View>
+          )}
+
+          {activeRide.payment && (
+            <View style={styles.paymentStatusRow}>
+              <Ionicons name={activeRide.payment.status === 'paid' ? 'checkmark-circle' : 'time-outline'} size={18} color={activeRide.payment.status === 'paid' ? Colors.success : Colors.warning} />
+              <Text style={styles.paymentStatusText}>
+                {activeRide.payment.status === 'paid' ? 'Payment confirmed' : activeRide.payment.status === 'pending_cash' ? 'Cash payment due to driver' : 'Payment submitted for verification'}
+              </Text>
             </View>
           )}
 
@@ -959,6 +1381,13 @@ const styles = StyleSheet.create({
     width: 32, height: 32, borderRadius: 16, backgroundColor: Colors.secondary, justifyContent: 'center', alignItems: 'center',
     borderWidth: 2, borderColor: Colors.primary,
   },
+  activeDriverMarker: {
+    width: 38, height: 38, borderRadius: 19, backgroundColor: Colors.primary, justifyContent: 'center', alignItems: 'center',
+    borderWidth: 3, borderColor: Colors.surface,
+  },
+  pickupMarker: {
+    width: 30, height: 30, borderRadius: 15, backgroundColor: Colors.secondary, justifyContent: 'center', alignItems: 'center',
+  },
   dropoffMarker: {
     width: 32, height: 32, borderRadius: 16, backgroundColor: Colors.accent, justifyContent: 'center', alignItems: 'center',
   },
@@ -1048,6 +1477,40 @@ const styles = StyleSheet.create({
   },
   btnPressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   btnDisabled: { opacity: 0.6 },
+  rideTypeRow: {
+    flexDirection: 'row', gap: 8, marginTop: 12,
+  },
+  rideTypeBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    backgroundColor: Colors.background, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: Colors.border,
+  },
+  rideTypeBtnActive: {
+    backgroundColor: Colors.primary, borderColor: Colors.primary,
+  },
+  rideTypeLabel: {
+    fontSize: 14, fontFamily: 'Inter_500Medium', color: Colors.textLight,
+  },
+  rideTypeLabelActive: {
+    color: Colors.secondary,
+  },
+  passengerRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8,
+  },
+  passengerLabel: {
+    fontSize: 14, fontFamily: 'Inter_500Medium', color: Colors.textLight,
+  },
+  passengerValue: {
+    fontSize: 14, fontFamily: 'Inter_700Bold', color: Colors.text,
+  },
+  passengerControls: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8,
+  },
+  passengerBtn: {
+    width: 40, height: 40, borderRadius: 10, backgroundColor: Colors.background, justifyContent: 'center', alignItems: 'center',
+  },
+  passengerCountText: {
+    fontSize: 16, fontFamily: 'Inter_700Bold', color: Colors.text,
+  },
   fareCard: {
     backgroundColor: Colors.background, borderRadius: 16, padding: 16, marginBottom: 16,
   },
@@ -1074,6 +1537,41 @@ const styles = StyleSheet.create({
   fareDivider: {
     height: 1, backgroundColor: Colors.border, marginVertical: 4,
   },
+  paymentTitle: {
+    fontSize: 15, fontFamily: 'Inter_600SemiBold', color: Colors.text, marginTop: 4, marginBottom: 8,
+  },
+  paymentMethodRow: {
+    flexDirection: 'row', gap: 6, marginBottom: 8,
+  },
+  paymentMethodBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4,
+    paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.background,
+  },
+  paymentMethodBtnActive: {
+    backgroundColor: Colors.primary, borderColor: Colors.primary,
+  },
+  paymentMethodText: {
+    fontSize: 12, fontFamily: 'Inter_500Medium', color: Colors.textLight,
+  },
+  paymentMethodTextActive: {
+    color: Colors.secondary,
+  },
+  mobilePaymentBox: {
+    backgroundColor: 'rgba(54, 214, 197, 0.08)', borderRadius: 12, padding: 10, marginBottom: 8,
+  },
+  paymentHint: {
+    fontSize: 12, lineHeight: 17, fontFamily: 'Inter_400Regular', color: Colors.textLight, marginBottom: 8,
+  },
+  paymentReferenceInput: {
+    backgroundColor: Colors.surface, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10,
+    fontSize: 14, fontFamily: 'Inter_400Regular', color: Colors.text, marginBottom: 8,
+  },
+  proofButton: {
+    flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 5,
+  },
+  proofButtonText: {
+    fontSize: 12, fontFamily: 'Inter_500Medium', color: Colors.primary,
+  },
   waitingContent: {
     alignItems: 'center', gap: 12, paddingVertical: 20,
   },
@@ -1082,6 +1580,56 @@ const styles = StyleSheet.create({
   },
   waitingSubtitle: {
     fontSize: 14, fontFamily: 'Inter_400Regular', color: Colors.textLight,
+  },
+  offersContainer: {
+    gap: 10, marginBottom: 12,
+  },
+  offerCard: {
+    backgroundColor: Colors.surface, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: Colors.border,
+  },
+  offerHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6,
+  },
+  offerDriverName: {
+    fontSize: 15, fontFamily: 'Inter_600SemiBold', color: Colors.text,
+  },
+  offerRating: {
+    fontSize: 13, fontFamily: 'Inter_500Medium', color: Colors.warning,
+  },
+  offerMeta: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8,
+  },
+  offerVehicle: {
+    fontSize: 12, fontFamily: 'Inter_400Regular', color: Colors.textLight,
+  },
+  offerSeats: {
+    fontSize: 12, fontFamily: 'Inter_400Regular', color: Colors.textLight,
+  },
+  offerFareRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8,
+  },
+  offerFareLabel: {
+    fontSize: 12, fontFamily: 'Inter_400Regular', color: Colors.textLight,
+  },
+  offerFarePrice: {
+    fontSize: 16, fontFamily: 'Inter_700Bold', color: Colors.primary,
+  },
+  offerActions: {
+    flexDirection: 'row', gap: 8, marginTop: 10,
+  },
+  acceptBtn: {
+    flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6,
+    backgroundColor: Colors.primary, paddingVertical: 10, borderRadius: 12,
+  },
+  acceptBtnText: {
+    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.background,
+  },
+  rejectBtn: {
+    flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(255, 59, 48, 0.08)', paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: Colors.error,
+  },
+  rejectBtnText: {
+    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.error,
   },
   cancelRideBtn: {
     backgroundColor: 'rgba(255, 59, 48, 0.1)', paddingVertical: 14, borderRadius: 14, alignItems: 'center', marginTop: 8,
@@ -1097,6 +1645,39 @@ const styles = StyleSheet.create({
   },
   rideStatusText: {
     fontSize: 16, fontFamily: 'Inter_600SemiBold', color: Colors.text,
+  },
+  etaRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(54, 214, 197, 0.1)', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 12,
+  },
+  etaLabel: {
+    flex: 1, fontSize: 14, fontFamily: 'Inter_500Medium', color: Colors.text,
+  },
+  etaValue: {
+    fontSize: 15, fontFamily: 'Inter_700Bold', color: Colors.primary,
+  },
+  ridePaymentCard: {
+    backgroundColor: 'rgba(54, 214, 197, 0.08)', borderRadius: 14, padding: 12, marginBottom: 12,
+  },
+  ridePaymentHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8,
+  },
+  ridePaymentTitle: {
+    fontSize: 15, fontFamily: 'Inter_600SemiBold', color: Colors.text,
+  },
+  ridePaymentAmount: {
+    fontSize: 17, fontFamily: 'Inter_700Bold', color: Colors.primary,
+  },
+  submitPaymentBtn: {
+    alignItems: 'center', justifyContent: 'center', minHeight: 40, paddingVertical: 9, borderRadius: 10, backgroundColor: Colors.primary, marginTop: 4,
+  },
+  submitPaymentText: {
+    fontSize: 13, fontFamily: 'Inter_600SemiBold', color: Colors.secondary,
+  },
+  paymentStatusRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8, marginBottom: 4,
+  },
+  paymentStatusText: {
+    fontSize: 13, fontFamily: 'Inter_500Medium', color: Colors.textLight,
   },
   driverCard: {
     flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: Colors.background, borderRadius: 16, padding: 14, marginBottom: 12,

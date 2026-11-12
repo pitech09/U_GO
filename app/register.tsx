@@ -24,6 +24,7 @@ export default function RegisterScreen() {
   const [year, setYear] = useState('');
   const [vColor, setVColor] = useState('');
   const [plate, setPlate] = useState('');
+  const [seats, setSeats] = useState('');
   const [loading, setLoading] = useState(false);
   const { showAlert, modalProps } = useAppModal();
 
@@ -35,8 +36,8 @@ export default function RegisterScreen() {
       showAlert('Missing Fields', 'Please fill in all required fields');
       return;
     }
-    if (isDriver && (!make.trim() || !model.trim() || !year.trim() || !plate.trim())) {
-      showAlert('Missing Vehicle Info', 'Please fill in all vehicle details');
+    if (isDriver && (!make.trim() || !model.trim() || !year.trim() || !plate.trim() || !seats.trim())) {
+      showAlert('Missing Vehicle Info', 'Please fill in all vehicle details including seating capacity');
       return;
     }
 
@@ -56,6 +57,7 @@ export default function RegisterScreen() {
           year: year.trim(),
           color: vColor.trim() || 'N/A',
           plate: plate.trim(),
+          seatingCapacity: parseInt(seats.trim(), 10),
         };
       }
       const user = await register(data);
@@ -101,6 +103,7 @@ export default function RegisterScreen() {
               <InputField icon="calendar-outline" placeholder="Year" value={year} onChangeText={setYear} keyboardType="number-pad" />
               <InputField icon="color-palette-outline" placeholder="Color" value={vColor} onChangeText={setVColor} />
               <InputField icon="document-text-outline" placeholder="License Plate" value={plate} onChangeText={setPlate} autoCapitalize="characters" />
+              <InputField icon="people-outline" placeholder="Passenger Seats" value={seats} onChangeText={setSeats} keyboardType="numeric" />
             </>
           )}
 

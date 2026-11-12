@@ -6,6 +6,7 @@ import {
 import { router } from 'expo-router';
 import MapView, {
   Marker,
+  Polyline,
   PROVIDER_DEFAULT,
   CartoTileLayer,
 } from '@/components/MapView';
@@ -20,6 +21,7 @@ import * as Haptics from 'expo-haptics';
 import type { Ride } from '@shared/schema';
 import { startIncomingRideAlert, stopIncomingRideAlert } from '@/lib/sound-notifications';
 import AppModal, { useAppModal } from '@/components/AppModal';
+import DriverTabBar from '@/components/DriverTabBar';
 
 const { width } = Dimensions.get('window');
 const LATITUDE_DELTA = 0.015;
@@ -33,13 +35,15 @@ export default function DriverScreen() {
   const mapRef = useRef<MapView>(null);
   const alertedRideIdsRef = useRef<Set<string>>(new Set());
   const previousAvailableRideIdsRef = useRef<Set<string>>(new Set());
+  const activeRidesRef = useRef<Ride[]>([]);
 
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [permissionStatus, setPermissionStatus] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState(user?.isOnline || false);
   const [phase, setPhase] = useState<DriverPhase>('dashboard');
   const [pendingRides, setPendingRides] = useState<Ride[]>([]);
-  const [activeRide, setActiveRide] = useState<Ride | null>(null);
+  const [activeRides, setActiveRides] = useState<Ride[]>([]);
+  const [selectedRideId, setSelectedRideId] = useState<string | null>(null);
   const [earnings, setEarnings] = useState({ today: 0, total: user?.totalEarnings || 0, rides: user?.totalRides || 0 });
   const [rideHistory, setRideHistory] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(false);
@@ -79,6 +83,13 @@ export default function DriverScreen() {
       rides: user?.totalRides || 0,
     });
   }, [user?.totalEarnings, user?.totalRides]);
+
+  useEffect(() => {
+    activeRidesRef.current = activeRides;
+    if (activeRides.some((ride) => ride.rideType !== 'shared')) {
+      stopIncomingRideAlert();
+    }
+  }, [activeRides]);
 
   useEffect(() => {
     if (location && user?.id) {
@@ -164,6 +175,18 @@ export default function DriverScreen() {
       alertedRideIdsRef.current = availableIds;
       previousAvailableRideIdsRef.current = availableIds;
 
+      const hasActivePrivateRide = activeRidesRef.current.some(
+        (ride) => ride.rideType !== 'shared'
+      );
+
+      // Drivers on a private ride must not be disturbed by new-request audio.
+      // The dispatch service also excludes them, but this client-side guard
+      // protects against stale requests already present in the polling result.
+      if (hasActivePrivateRide) {
+        stopIncomingRideAlert();
+        return;
+      }
+
       if (isOnline && hasNewRide) {
         startIncomingRideAlert();
       }
@@ -180,12 +203,17 @@ export default function DriverScreen() {
       const baseUrl = getApiUrl();
       const url = new URL(`/api/rides/driver/${user.id}/active`, baseUrl);
       const res = await fetch(url.toString(), { cache: 'no-store' });
-      const data = await res.json();
-      if (data && data.id) {
-        setActiveRide(data);
-        if (data.status === 'accepted' || data.status === 'arriving') setPhase('navigating');
-        else if (data.status === 'arrived') setPhase('arrived');
-        else if (data.status === 'in_progress') setPhase('in_ride');
+      const data: Ride[] = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        setActiveRides(data);
+        const selected = data.find(ride => ride.id === selectedRideId) ?? data[0];
+        setSelectedRideId(selected.id);
+        if (selected.status === 'arriving' || selected.status === 'accepted') setPhase('navigating');
+        else if (selected.status === 'arrived') setPhase('arrived');
+        else if (selected.status === 'in_progress') setPhase('in_ride');
+      } else {
+        setActiveRides([]);
+        setSelectedRideId(null);
       }
     } catch {}
   };
@@ -218,7 +246,8 @@ export default function DriverScreen() {
 
       const res = await apiRequest('PUT', `/api/rides/${rideId}/accept`, { driverId: user.id });
       const ride = await res.json();
-      setActiveRide(ride);
+      setActiveRides(prev => [...prev, ride]);
+      setSelectedRideId(ride.id);
       setPhase('navigating');
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
@@ -231,19 +260,19 @@ export default function DriverScreen() {
     }
   };
 
-  const updateRideStatus = async (status: string) => {
-    if (!activeRide?.id) return;
+  const updateRideStatus = async (status: string, rideId: string = activeRides.find(r => r.id === selectedRideId)?.id || '') => {
     setLoading(true);
     try {
-      const res = await apiRequest('PUT', `/api/rides/${activeRide.id}/status`, { status });
+      const res = await apiRequest('PUT', `/api/rides/${rideId}/status`, { status });
       const updated = await res.json();
-      setActiveRide(updated);
+      setActiveRides(prev => prev.map(r => r.id === rideId ? updated : r));
 
       if (status === 'arrived') setPhase('arrived');
       else if (status === 'in_progress') setPhase('in_ride');
       else if (status === 'completed') {
         setPhase(isOnline ? 'online' : 'dashboard');
-        setActiveRide(null);
+        setActiveRides([]);
+        setSelectedRideId(null);
         fetchRideHistory();
         refreshUser();
         if (updated.fare) {
@@ -263,13 +292,30 @@ export default function DriverScreen() {
     }
   };
 
-  const openNavigationApp = (lat: number, lng: number, label: string) => {
-    const url = Platform.select({
-      ios: `maps:0,0?q=${label}@${lat},${lng}`,
-      android: `geo:${lat},${lng}?q=${lat},${lng}(${label})`,
-      default: `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`,
+  const openOptimizedActiveTripsRoute = () => {
+    if (activeRides.length === 0) return;
+
+    const stops = optimizeActiveTripStops(activeRides, location);
+    const destination = stops[stops.length - 1];
+    if (!destination) return;
+
+    const params = new URLSearchParams({
+      api: '1',
+      destination: `${destination.lat},${destination.lng}`,
+      travelmode: 'driving',
+      dir_action: 'navigate',
     });
-    if (url) Linking.openURL(url);
+
+    if (location) {
+      params.set('origin', `${location.lat},${location.lng}`);
+    }
+
+    const waypoints = stops.slice(0, -1);
+    if (waypoints.length > 0) {
+      params.set('waypoints', waypoints.map(stop => `${stop.lat},${stop.lng}`).join('|'));
+    }
+
+    Linking.openURL(`https://www.google.com/maps/dir/?${params.toString()}`);
   };
 
   if (permissionStatus === null) {
@@ -326,6 +372,8 @@ export default function DriverScreen() {
               </Pressable>
             </View>
           </View>
+
+          <DriverTabBar active="home" />
 
           <View style={styles.earningsCard}>
             <Text style={styles.earningsLabel}>Today&apos;s Earnings</Text>
@@ -440,14 +488,22 @@ export default function DriverScreen() {
         >
           <CartoTileLayer />
 
-          {activeRide && (
-            <>
+          {activeRides.map(ride => (
+            <React.Fragment key={ride.id}>
+              <Polyline
+                coordinates={[
+                  { latitude: ride.pickup.lat, longitude: ride.pickup.lng },
+                  { latitude: ride.dropoff.lat, longitude: ride.dropoff.lng },
+                ]}
+                strokeColor={ride.id === selectedRideId ? Colors.primary : Colors.accent}
+                strokeWidth={ride.id === selectedRideId ? 5 : 3}
+              />
               <Marker
                 coordinate={{
-                  latitude: activeRide.pickup.lat,
-                  longitude: activeRide.pickup.lng,
+                  latitude: ride.pickup.lat,
+                  longitude: ride.pickup.lng,
                 }}
-                title="Pickup"
+                title={`${ride.riderName || 'Rider'} - ${ride.status}`}
               >
                 <View style={styles.pickupMarker}>
                   <Ionicons name="person" size={14} color={Colors.textWhite} />
@@ -455,8 +511,8 @@ export default function DriverScreen() {
               </Marker>
               <Marker
                 coordinate={{
-                  latitude: activeRide.dropoff.lat,
-                  longitude: activeRide.dropoff.lng,
+                  latitude: ride.dropoff.lat,
+                  longitude: ride.dropoff.lng,
                 }}
                 title="Drop-off"
               >
@@ -464,8 +520,8 @@ export default function DriverScreen() {
                   <Ionicons name="flag" size={14} color={Colors.textWhite} />
                 </View>
               </Marker>
-            </>
-          )}
+            </React.Fragment>
+          ))}
 
           {pendingRides.map(ride => (
             <Marker
@@ -511,13 +567,64 @@ export default function DriverScreen() {
           </Text>
         </Pressable>
 
-        {activeRide?.fare && (
+        {activeRides.find(r => r.id === selectedRideId)?.fare && (
           <View style={styles.earningChip}>
             <Ionicons name="cash" size={16} color={Colors.primary} />
-            <Text style={styles.earningChipText}>M{activeRide.fare.driverEarnings.toFixed(2)}</Text>
+            <Text style={styles.earningChipText}>M{activeRides.find(r => r.id === selectedRideId)!.fare!.driverEarnings.toFixed(2)}</Text>
           </View>
         )}
       </View>
+
+      <View style={[styles.driverTabs, { top: topInset + 56 }]}>
+        <DriverTabBar active="home" />
+      </View>
+
+      {activeRides.length > 0 && (
+        <View style={[styles.activeTripPanel, { top: topInset + 112 }]}>
+          <View style={styles.activeTripHeading}>
+            <Text style={styles.activeTripTitle}>Active trips</Text>
+            <Text style={styles.activeTripCount}>{activeRides.length}</Text>
+            <Pressable style={styles.optimizeRouteButton} onPress={openOptimizedActiveTripsRoute}>
+              <Ionicons name="navigate" size={15} color={Colors.secondary} />
+              <Text style={styles.optimizeRouteText}>Optimize route</Text>
+            </Pressable>
+          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.activeTripList}>
+            {activeRides.map(ride => (
+              <Pressable
+                key={ride.id}
+                style={[styles.activeTripCard, ride.id === selectedRideId && styles.activeTripCardSelected]}
+                onPress={() => {
+                  setSelectedRideId(ride.id);
+                  if (ride.status === 'arriving' || ride.status === 'accepted') setPhase('navigating');
+                  else if (ride.status === 'arrived') setPhase('arrived');
+                  else if (ride.status === 'in_progress') setPhase('in_ride');
+                }}
+              >
+                <View style={styles.activeTripCardHeader}>
+                  <Text style={styles.activeTripStatus}>{driverRideStatusLabel(ride.status)}</Text>
+                  <Text style={styles.activeTripPassengers}>{ride.passengerCount || 1} pax</Text>
+                </View>
+                <Text style={styles.activeTripPickup} numberOfLines={1}>{ride.pickup.address}</Text>
+                <View style={styles.activeTripRouteLine} />
+                <View style={styles.activeTripDestinationRow}>
+                  <Ionicons name="flag" size={14} color={Colors.warning} />
+                  <Text style={styles.activeTripDestination} numberOfLines={2}>{ride.dropoff.address}</Text>
+                </View>
+                <View style={styles.activeTripFooter}>
+                  <Text style={styles.activeTripEarnings}>M{ride.fare?.driverEarnings.toFixed(2) ?? '0.00'}</Text>
+                  <Pressable
+                    hitSlop={8}
+                    onPress={openOptimizedActiveTripsRoute}
+                  >
+                    <Ionicons name="navigate-circle" size={26} color={Colors.primary} />
+                  </Pressable>
+                </View>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      )}
 
       {phase === 'online' && pendingRides.length > 0 && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
@@ -578,26 +685,29 @@ export default function DriverScreen() {
         </Animated.View>
       )}
 
-      {phase === 'navigating' && activeRide && (
+      {phase === 'navigating' && selectedRideId && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
           <View style={styles.rideStatusHeader}>
             <View style={[styles.statusIndicator, { backgroundColor: Colors.warning }]} />
             <Text style={styles.cardTitle}>Navigate to Pickup</Text>
           </View>
-          <Text style={styles.rideAddress} numberOfLines={2}>{activeRide.pickup.address}</Text>
+          <Text style={styles.rideAddress} numberOfLines={2}>{activeRides.find(r => r.id === selectedRideId)?.pickup.address}</Text>
 
           <View style={styles.actionRow}>
             <Pressable
               style={({ pressed }) => [styles.navBtn, pressed && styles.btnPressed]}
-              onPress={() => openNavigationApp(activeRide.pickup.lat, activeRide.pickup.lng, 'Pickup')}
+              onPress={() => {
+                const ride = activeRides.find(r => r.id === selectedRideId);
+                if (ride) openOptimizedActiveTripsRoute();
+              }}
             >
               <Ionicons name="navigate" size={20} color={Colors.textWhite} />
               <Text style={styles.navBtnText}>Navigate</Text>
             </Pressable>
             <Pressable
               style={({ pressed }) => [styles.arrivedBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
-              onPress={() => updateRideStatus('arrived')}
+              onPress={() => updateRideStatus('arrived', selectedRideId)}
               disabled={loading}
             >
               <Ionicons name="flag" size={20} color={Colors.secondary} />
@@ -607,7 +717,7 @@ export default function DriverScreen() {
         </Animated.View>
       )}
 
-      {phase === 'arrived' && activeRide && (
+      {phase === 'arrived' && selectedRideId && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
           <View style={styles.rideStatusHeader}>
@@ -615,11 +725,11 @@ export default function DriverScreen() {
             <Text style={styles.cardTitle}>Waiting for Rider</Text>
           </View>
           <Text style={styles.rideInfo}>
-            {activeRide.riderName || 'Rider'} has been notified of your arrival
+            {activeRides.find(r => r.id === selectedRideId)?.riderName || 'Rider'} has been notified of your arrival
           </Text>
           <Pressable
             style={({ pressed }) => [styles.startRideBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
-            onPress={() => updateRideStatus('in_progress')}
+            onPress={() => updateRideStatus('in_progress', selectedRideId)}
             disabled={loading}
           >
             <Ionicons name="car" size={20} color={Colors.secondary} />
@@ -628,7 +738,7 @@ export default function DriverScreen() {
         </Animated.View>
       )}
 
-      {phase === 'in_ride' && activeRide && (
+      {phase === 'in_ride' && selectedRideId && (
         <Animated.View entering={SlideInDown.duration(400)} style={[styles.bottomCard, { paddingBottom: bottomInset + 16 }]}>
           <View style={styles.cardHandle} />
           <View style={styles.rideStatusHeader}>
@@ -638,13 +748,16 @@ export default function DriverScreen() {
 
           <View style={styles.rideDestination}>
             <Ionicons name="flag" size={18} color={Colors.accent} />
-            <Text style={styles.rideDestText} numberOfLines={2}>{activeRide.dropoff.address}</Text>
+            <Text style={styles.rideDestText} numberOfLines={2}>{activeRides.find(r => r.id === selectedRideId)?.dropoff.address}</Text>
           </View>
 
           <View style={styles.actionRow}>
             <Pressable
               style={({ pressed }) => [styles.navBtn, pressed && styles.btnPressed]}
-              onPress={() => openNavigationApp(activeRide.dropoff.lat, activeRide.dropoff.lng, 'Dropoff')}
+              onPress={() => {
+                const ride = activeRides.find(r => r.id === selectedRideId);
+                if (ride) openOptimizedActiveTripsRoute();
+              }}
             >
               <Ionicons name="navigate" size={20} color={Colors.textWhite} />
               <Text style={styles.navBtnText}>Navigate</Text>
@@ -659,10 +772,10 @@ export default function DriverScreen() {
             </Pressable>
           </View>
 
-          {activeRide.fare && (
+          {activeRides.find(r => r.id === selectedRideId)?.fare && (
             <View style={styles.rideEarnings}>
               <Text style={styles.rideEarningsLabel}>You&apos;ll earn</Text>
-              <Text style={styles.rideEarningsValue}>M{activeRide.fare.driverEarnings.toFixed(2)}</Text>
+              <Text style={styles.rideEarningsValue}>M{activeRides.find(r => r.id === selectedRideId)!.fare!.driverEarnings.toFixed(2)}</Text>
             </View>
           )}
         </Animated.View>
@@ -670,6 +783,71 @@ export default function DriverScreen() {
       <AppModal {...modalProps} />
     </View>
   );
+}
+
+type NavigationStop = {
+  lat: number;
+  lng: number;
+  rideId: string;
+  kind: 'pickup' | 'dropoff';
+};
+
+function optimizeActiveTripStops(
+  rides: Ride[],
+  location: { lat: number; lng: number } | null
+): NavigationStop[] {
+  const remaining = rides.map(ride => ({
+    ride,
+    pickedUp: ride.status === 'arrived' || ride.status === 'in_progress',
+  }));
+  const stops: NavigationStop[] = [];
+  let current = location ?? {
+    lat: rides[0].pickup.lat,
+    lng: rides[0].pickup.lng,
+  };
+
+  while (remaining.length > 0) {
+    let bestIndex = 0;
+    let bestStop: NavigationStop | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    remaining.forEach((entry, index) => {
+      const useDropoff = entry.pickedUp;
+      const point = useDropoff ? entry.ride.dropoff : entry.ride.pickup;
+      const distance = Math.pow(point.lat - current.lat, 2) + Math.pow(point.lng - current.lng, 2);
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+        bestStop = {
+          lat: point.lat,
+          lng: point.lng,
+          rideId: entry.ride.id,
+          kind: useDropoff ? 'dropoff' : 'pickup',
+        };
+      }
+    });
+
+    if (!bestStop) break;
+    const selectedStop = bestStop as NavigationStop;
+    stops.push(selectedStop);
+    current = { lat: selectedStop.lat, lng: selectedStop.lng };
+
+    if (selectedStop.kind === 'pickup') {
+      remaining[bestIndex].pickedUp = true;
+    } else {
+      remaining.splice(bestIndex, 1);
+    }
+  }
+
+  return stops;
+}
+
+function driverRideStatusLabel(status: Ride['status']): string {
+  if (status === 'in_progress') return 'In progress';
+  if (status === 'arriving') return 'Heading to pickup';
+  if (status === 'arrived') return 'At pickup';
+  return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 const styles = StyleSheet.create({
@@ -797,6 +975,49 @@ const styles = StyleSheet.create({
   topBar: {
     position: 'absolute', left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', zIndex: 10,
   },
+  driverTabs: {
+    position: 'absolute', left: 12, right: 12, zIndex: 10,
+  },
+  activeTripPanel: {
+    position: 'absolute', left: 12, right: 12, zIndex: 9,
+  },
+  activeTripHeading: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6,
+  },
+  optimizeRouteButton: {
+    flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: 'auto',
+    backgroundColor: Colors.primary, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 10,
+  },
+  optimizeRouteText: {
+    fontSize: 11, fontFamily: 'Inter_700Bold', color: Colors.secondary,
+  },
+  activeTripTitle: {
+    fontSize: 14, fontFamily: 'Inter_700Bold', color: Colors.textWhite,
+  },
+  activeTripCount: {
+    minWidth: 20, textAlign: 'center', paddingHorizontal: 5, paddingVertical: 2,
+    borderRadius: 10, backgroundColor: Colors.primary, color: Colors.secondary,
+    fontSize: 11, fontFamily: 'Inter_700Bold',
+  },
+  activeTripList: { gap: 10 },
+  activeTripCard: {
+    width: 238, backgroundColor: 'rgba(16, 29, 50, 0.94)', borderRadius: 16,
+    padding: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
+  },
+  activeTripCardSelected: { borderColor: Colors.primary, borderWidth: 2 },
+  activeTripCardHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8,
+  },
+  activeTripStatus: { fontSize: 11, fontFamily: 'Inter_700Bold', color: Colors.primary },
+  activeTripPassengers: { fontSize: 11, fontFamily: 'Inter_500Medium', color: Colors.textLight },
+  activeTripPickup: { fontSize: 12, fontFamily: 'Inter_500Medium', color: Colors.textWhite },
+  activeTripRouteLine: { width: 1, height: 9, marginLeft: 4, backgroundColor: Colors.textLight },
+  activeTripDestinationRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
+  activeTripDestination: { flex: 1, fontSize: 12, fontFamily: 'Inter_600SemiBold', color: Colors.textWhite },
+  activeTripFooter: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8,
+  },
+  activeTripEarnings: { fontSize: 14, fontFamily: 'Inter_700Bold', color: Colors.primary },
   onlineToggle: {
     flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(52, 199, 89, 0.15)',
     paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, borderWidth: 1, borderColor: 'rgba(52, 199, 89, 0.3)',

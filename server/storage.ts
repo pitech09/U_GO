@@ -45,6 +45,18 @@ export interface IStorage {
   acquireDispatchLock(token: string, ttlMs: number): Promise<boolean>;
   releaseDispatchLock(token: string): Promise<boolean>;
   getDriverRideOffers(driverId: string): Promise<Array<Ride & { offerExpiresAt: number }>>;
+  getRideOffersForRider(riderId: string): Promise<Array<{
+    rideId: string;
+    ride: Ride;
+    driverId: string;
+    offer: {
+      driverId: string;
+      rideId: string;
+      createdAt: number;
+      expiresAt: number;
+      status: 'pending' | 'expired';
+    };
+  }>>;
   rejectRideOffer(driverId: string, rideId: string): Promise<boolean>;
   acceptRideOffer(driverId: string, rideId: string, driverName: string): Promise<{
     status:
@@ -101,6 +113,8 @@ const DEFAULT_CONFIG: PlatformConfig = {
   dispatchMaximumRadiusKm: 30,
   dispatchOfferWindowSeconds: 45,
 };
+
+const FARE_MODEL_VERSION = 2;
 
 export class RedisStorage implements IStorage {
   private redis: Redis;
@@ -212,11 +226,19 @@ export class RedisStorage implements IStorage {
     const data = await this.redis.get('rideflow:config');
     if (!data) return { ...DEFAULT_CONFIG };
 
-    const parsed = JSON.parse(data) as Partial<PlatformConfig> & { perMile?: number };
+    const parsed = JSON.parse(data) as Partial<PlatformConfig> & {
+      perMile?: number;
+      fareModelVersion?: number;
+    };
     const { perMile, ...rest } = parsed;
 
-    // One-time migration from the previous per-mile fare configuration.
-    if (typeof perMile === 'number') {
+    // One-time migration from the previous fare models. Existing Redis data
+    // may contain the old passenger-multiplied tariff, so reset the pricing
+    // fields to the current defaults before calculating any new fares.
+    if (
+      typeof perMile === 'number' ||
+      parsed.fareModelVersion !== FARE_MODEL_VERSION
+    ) {
       const migrated: PlatformConfig = {
         ...DEFAULT_CONFIG,
         ...rest,
@@ -225,8 +247,18 @@ export class RedisStorage implements IStorage {
         perMinute: 0.35,
         driverSharePercent: 88,
         minimumFare: 20,
+        surgePricing: false,
+        surgeMultiplier: 1,
+        sharedRideDiscountPercent: 15,
+        groupDiscountPercent: 20,
+        passengerPricingMode: 'fixed',
+        additionalPassengerFee: 0,
+        additionalPassengerMultiplier: 1,
       };
-      await this.redis.set('rideflow:config', JSON.stringify(migrated));
+      await this.redis.set('rideflow:config', JSON.stringify({
+        ...migrated,
+        fareModelVersion: FARE_MODEL_VERSION,
+      }));
       return migrated;
     }
 
@@ -710,6 +742,59 @@ export class RedisStorage implements IStorage {
     return results;
   }
 
+  async getRideOffersForRider(
+    riderId: string
+  ): Promise<Array<{
+    rideId: string;
+    ride: Ride;
+    driverId: string;
+    offer: {
+      driverId: string;
+      rideId: string;
+      createdAt: number;
+      expiresAt: number;
+      status: 'pending' | 'expired';
+    };
+  }>> {
+    const rides = await this.getRidesByRider(riderId);
+    const results: Array<{
+      rideId: string;
+      ride: Ride;
+      driverId: string;
+      offer: {
+        driverId: string;
+        rideId: string;
+        createdAt: number;
+        expiresAt: number;
+        status: 'pending' | 'expired';
+      };
+    }> = [];
+
+    for (const ride of rides) {
+      const driverIds = await this.redis.smembers(
+        `rideflow:ride_offered_drivers:${ride.id}`
+      );
+
+      for (const driverId of driverIds) {
+        const offerData = await this.redis.hget(
+          'rideflow:offers',
+          `${driverId}:${ride.id}`
+        );
+        if (offerData) {
+          const offer = JSON.parse(offerData);
+          results.push({
+            rideId: ride.id,
+            ride,
+            driverId,
+            offer,
+          });
+        }
+      }
+    }
+
+    return results;
+  }
+
   async rejectRideOffer(driverId: string, rideId: string): Promise<boolean> {
     const script = `
       local offerData = redis.call('HGET', KEYS[1], ARGV[1])
@@ -790,9 +875,9 @@ export class RedisStorage implements IStorage {
       local passengerCount = tonumber(ride.passengerCount) or
         (1 + (tonumber(ride.additionalPassengers) or 0))
 
-      if passengerCount > capacity then
-        return 'capacity_exceeded'
-      end
+      -- Calculate remaining capacity from all active rides already assigned
+      -- to this driver.
+      local remainingCapacity = capacity
 
       local allRides = redis.call('HVALS', KEYS[1])
       for _, data in ipairs(allRides) do
@@ -800,8 +885,22 @@ export class RedisStorage implements IStorage {
         if existing.driverId == ARGV[3]
           and existing.status ~= 'completed'
           and existing.status ~= 'cancelled' then
-          return 'active_ride'
+          -- Private rides are exclusive: a driver with an active Private ride
+          -- cannot accept any new offers.
+          if existing.rideType == 'private' then
+            return 'active_ride'
+          end
+
+          -- Shared rides can be combined: subtract their passenger count
+          -- from the driver's remaining capacity.
+          local existingPassengerCount = tonumber(existing.passengerCount) or
+            (1 + (tonumber(existing.additionalPassengers) or 0))
+          remainingCapacity = remainingCapacity - existingPassengerCount
         end
+      end
+
+      if passengerCount > remainingCapacity then
+        return 'capacity_exceeded'
       end
 
       ride.driverId = ARGV[3]
@@ -944,7 +1043,10 @@ export class RedisStorage implements IStorage {
       throw new Error('Maximum dispatch radius cannot be smaller than the initial radius');
     }
 
-    await this.redis.set('rideflow:config', JSON.stringify(updated));
+    await this.redis.set('rideflow:config', JSON.stringify({
+      ...updated,
+      fareModelVersion: FARE_MODEL_VERSION,
+    }));
     return updated;
   }
 }
