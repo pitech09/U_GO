@@ -56,6 +56,7 @@ export default function RiderScreen() {
   const [activeRide, setActiveRide] = useState<Ride | null>(null);
   const [driverInfo, setDriverInfo] = useState<any>(null);
   const [driverEtaMinutes, setDriverEtaMinutes] = useState<number | null>(null);
+  const [routeCoordinates, setRouteCoordinates] = useState<Array<{ latitude: number; longitude: number }>>([]);
   const [loading, setLoading] = useState(false);
   const [addressInput, setAddressInput] = useState('');
   const [addressSearching, setAddressSearching] = useState(false);
@@ -299,15 +300,38 @@ export default function RiderScreen() {
     setDriverEtaMinutes(Math.max(1, Math.ceil(distanceKm * (3 / 1.609344))));
   }, [activeRide?.id, activeRide?.status, activeRide?.pickup, activeRide?.dropoff, activeDriverPosition?.lat, activeDriverPosition?.lng]);
 
-  const activeRideRouteCoordinates = activeRide && activeDriverPosition
-    ? [
-        { latitude: activeDriverPosition.lat, longitude: activeDriverPosition.lng },
-        ...(activeRide.status === 'in_progress'
-          ? []
-          : [{ latitude: activeRide.pickup.lat, longitude: activeRide.pickup.lng }]),
-        { latitude: activeRide.dropoff.lat, longitude: activeRide.dropoff.lng },
-      ]
-    : null;
+  useEffect(() => {
+    const waypoints = activeRide && activeDriverPosition
+      ? [
+          activeDriverPosition,
+          ...(activeRide.status === 'in_progress' ? [] : [activeRide.pickup]),
+          activeRide.dropoff,
+        ]
+      : location && dropoffCoord
+        ? [location, dropoffCoord]
+        : [];
+
+    if (waypoints.length < 2) {
+      setRouteCoordinates([]);
+      return;
+    }
+
+    let cancelled = false;
+    const fetchRoute = async () => {
+      try {
+        const res = await apiRequest('POST', '/api/routes/route', { waypoints });
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.coordinates)) {
+          setRouteCoordinates(data.coordinates);
+        }
+      } catch {
+        if (!cancelled) setRouteCoordinates([]);
+      }
+    };
+
+    fetchRoute();
+    return () => { cancelled = true; };
+  }, [location?.lat, location?.lng, dropoffCoord?.lat, dropoffCoord?.lng, activeRide?.id, activeRide?.status, activeRide?.pickup.lat, activeRide?.pickup.lng, activeRide?.dropoff.lat, activeRide?.dropoff.lng, activeDriverPosition?.lat, activeDriverPosition?.lng]);
 
   const handleMapPress = (e: any) => {
     if (phase !== 'selecting_dropoff') return;
@@ -672,13 +696,16 @@ export default function RiderScreen() {
             </Marker>
           ))}
 
-          {activeRide && activeDriverPosition && activeRideRouteCoordinates && (
+          {routeCoordinates.length > 1 && (
+            <Polyline
+              coordinates={routeCoordinates}
+              strokeColor={Colors.primary}
+              strokeWidth={5}
+            />
+          )}
+
+          {activeRide && activeDriverPosition && (
             <>
-              <Polyline
-                coordinates={activeRideRouteCoordinates}
-                strokeColor={Colors.primary}
-                strokeWidth={5}
-              />
               {activeRide.status !== 'in_progress' && (
                 <Marker
                   coordinate={{

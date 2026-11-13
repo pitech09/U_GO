@@ -66,6 +66,45 @@ async function reverseGeocodeGeoapify(lat: number, lon: number): Promise<string 
   return data.results?.[0]?.formatted ?? null;
 }
 
+async function routeGeoapify(waypoints: Array<{ lat: number; lng: number }>): Promise<Array<{ latitude: number; longitude: number }>> {
+  const apiKey = process.env.GEOAPIFY_API_KEY?.trim();
+
+  if (!apiKey) {
+    throw new Error("GEOAPIFY_API_KEY is not configured");
+  }
+
+  const url = new URL("https://api.geoapify.com/v1/routing");
+  url.searchParams.set(
+    "waypoints",
+    waypoints.map((point) => `${point.lat},${point.lng}`).join("|")
+  );
+  url.searchParams.set("mode", "drive");
+  url.searchParams.set("apiKey", apiKey);
+
+  const response = await fetch(url.toString(), {
+    headers: { "Accept": "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Geoapify routing returned HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+  const geometry = data.features?.[0]?.geometry;
+  const coordinates = geometry?.type === "LineString"
+    ? geometry.coordinates
+    : geometry?.type === "MultiLineString"
+      ? geometry.coordinates.flat()
+      : [];
+
+  return coordinates
+    .filter((point: unknown): point is [number, number] =>
+      Array.isArray(point) && point.length >= 2 &&
+      Number.isFinite(point[0]) && Number.isFinite(point[1])
+    )
+    .map(([longitude, latitude]: [number, number]) => ({ latitude, longitude }));
+}
+
 export async function registerRoutes(app: Express, routeStorage: IStorage = storage): Promise<Server> {
 
   app.get("/api/geocode/search", async (req: Request, res: Response) => {
@@ -109,6 +148,37 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       return res.status(502).json({
         message: "Location lookup is temporarily unavailable.",
       });
+    }
+  });
+
+  app.post("/api/routes/route", async (req: Request, res: Response) => {
+    const waypoints = req.body?.waypoints;
+
+    if (!Array.isArray(waypoints) || waypoints.length < 2 || waypoints.length > 25) {
+      return res.status(400).json({ message: "Between 2 and 25 route waypoints are required." });
+    }
+
+    const parsedWaypoints = waypoints.map((point: any) => ({
+      lat: Number(point?.lat),
+      lng: Number(point?.lng),
+    }));
+
+    if (parsedWaypoints.some(({ lat, lng }) =>
+      !Number.isFinite(lat) || !Number.isFinite(lng) ||
+      lat < -90 || lat > 90 || lng < -180 || lng > 180
+    )) {
+      return res.status(400).json({ message: "Route waypoints must contain valid coordinates." });
+    }
+
+    try {
+      const coordinates = await routeGeoapify(parsedWaypoints);
+      if (coordinates.length < 2) {
+        return res.status(502).json({ message: "No drivable route was found." });
+      }
+      return res.json({ coordinates });
+    } catch (error) {
+      console.error("Road route lookup failed:", error);
+      return res.status(502).json({ message: "Road route lookup is temporarily unavailable." });
     }
   });
 
