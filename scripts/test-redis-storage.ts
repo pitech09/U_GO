@@ -314,7 +314,7 @@ test("Redis rejects duplicate offers for the same driver and ride", async () => 
   assert.equal(queueCount, 1);
 });
 
-test("Redis refuses expired offers and marks them expired during retrieval", async () => {
+test("Redis marks expired offers and allows them to be advertised again", async () => {
   const { driver, ride } = await createAcceptanceFixture({
     capacity: 4,
   });
@@ -357,18 +357,18 @@ test("Redis refuses expired offers and marks them expired during retrieval", asy
   const expiredData = await redisClient.hget("rideflow:offers", offerKey);
   assert.equal(JSON.parse(expiredData).status, "expired");
 
-  // Verify the offered-driver set independently prevents another dispatch round.
+  // An expired offer is not an explicit rejection, so it can be advertised again.
   await redisClient.del(`rideflow:driver_rejections:${driver.id}`);
 
   assert.equal(
     await storage.createRideOffer(driver.id, ride.id),
-    false,
-    "An expired offer must not be sent to the same driver again"
+    true,
+    "An expired offer should be re-advertisable"
   );
 
   assert.equal(
     await redisClient.zcard(`rideflow:driver_offers:${driver.id}`),
-    0
+    1
   );
 });
 
@@ -545,12 +545,12 @@ test("Redis withdraws competing offers when a ride is accepted", async () => {
     `${otherDriver.id}:${ride.id}`
   );
 
-  assert.equal(JSON.parse(winningDriverOtherOffer).status, "withdrawn");
+  assert.equal(JSON.parse(winningDriverOtherOffer).status, "pending");
   assert.equal(JSON.parse(competingDriverOffer).status, "withdrawn");
 
   assert.equal(
-    await redisClient.zcard(`rideflow:driver_offers:${driver.id}`),
-    0
+    await redisClient.zscore(`rideflow:driver_offers:${driver.id}`, secondRide.id) > 0,
+    true
   );
   assert.equal(
     await redisClient.zcard(`rideflow:driver_offers:${otherDriver.id}`),

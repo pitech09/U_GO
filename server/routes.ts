@@ -2,13 +2,57 @@ import { calculateDistance } from "../shared/distance";
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
 import { storage, type IStorage } from "./storage";
-import { registerSchema, loginSchema, requestRideSchema, updateLocationSchema, updateVehicleSchema } from "@shared/schema";
+import { registerSchema, loginSchema, requestRideSchema, updateLocationSchema, updateVehicleSchema, vehiclePhotosSchema, driverKycSchema } from "@shared/schema";
 import type { RideStatus } from "@shared/schema";
+import { randomUUID } from "node:crypto";
+import { initiateMobileMoneyPayment, parseProviderWebhook, queryMpesaTransaction, reverseMpesaTransaction, verifyProviderWebhook, type MobileMoneyProvider } from "./payments";
+import { publishRealtimeEvent } from "./realtime";
+import { hashPassword, signAccessToken, verifyPassword } from "./auth";
 
 function getRouteParam(value: string | string[] | undefined): string {
   return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
 }
 
+function authenticatedDriverId(res: Response): string | null {
+  return res.locals.auth?.role === 'driver' ? res.locals.auth.sub : null;
+}
+
+function authenticatedUserId(res: Response): string | null {
+  return res.locals.auth?.sub || null;
+}
+
+function isAdmin(res: Response): boolean {
+  return res.locals.auth?.role === 'admin';
+}
+
+function publicUser(user: any) {
+  const { password: _, ...safe } = user;
+  if (safe.kyc) {
+    safe.kyc = {
+      status: safe.kyc.status,
+      submittedAt: safe.kyc.submittedAt,
+      reviewedAt: safe.kyc.reviewedAt,
+      rejectionReason: safe.kyc.rejectionReason,
+    };
+  }
+  return safe;
+}
+
+const GEOAPIFY_TIMEOUT_MS = 8_000;
+
+async function fetchGeoapify(url: string): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GEOAPIFY_TIMEOUT_MS);
+
+  try {
+    return await fetch(url, {
+      headers: { "Accept": "application/json" },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 
 async function geoapifyRequest(endpoint: string, params: Record<string, string>): Promise<any> {
@@ -26,9 +70,7 @@ async function geoapifyRequest(endpoint: string, params: Record<string, string>)
 
   url.searchParams.set("apiKey", apiKey);
 
-  const response = await fetch(url.toString(), {
-    headers: { "Accept": "application/json" },
-  });
+  const response = await fetchGeoapify(url.toString());
 
   if (!response.ok) {
     throw new Error(`Geoapify returned HTTP ${response.status}`);
@@ -81,9 +123,7 @@ async function routeGeoapify(waypoints: Array<{ lat: number; lng: number }>): Pr
   url.searchParams.set("mode", "drive");
   url.searchParams.set("apiKey", apiKey);
 
-  const response = await fetch(url.toString(), {
-    headers: { "Accept": "application/json" },
-  });
+  const response = await fetchGeoapify(url.toString());
 
   if (!response.ok) {
     throw new Error(`Geoapify routing returned HTTP ${response.status}`);
@@ -105,7 +145,35 @@ async function routeGeoapify(waypoints: Array<{ lat: number; lng: number }>): Pr
     .map(([longitude, latitude]: [number, number]) => ({ latitude, longitude }));
 }
 
+async function estimateGeoapifyTravelSeconds(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number },
+): Promise<number> {
+  const apiKey = process.env.GEOAPIFY_API_KEY?.trim();
+  if (!apiKey) throw new Error("GEOAPIFY_API_KEY is not configured");
+
+  const url = new URL("https://api.geoapify.com/v1/routing");
+  url.searchParams.set("waypoints", `${from.lat},${from.lng}|${to.lat},${to.lng}`);
+  url.searchParams.set("mode", "drive");
+  url.searchParams.set("apiKey", apiKey);
+  const response = await fetchGeoapify(url.toString());
+  if (!response.ok) throw new Error(`Geoapify routing returned HTTP ${response.status}`);
+  const data = await response.json();
+  const seconds = Number(data.features?.[0]?.properties?.time);
+  if (!Number.isFinite(seconds) || seconds < 0) throw new Error("Routing duration unavailable");
+  return Math.round(seconds);
+}
+
 export async function registerRoutes(app: Express, routeStorage: IStorage = storage): Promise<Server> {
+
+  app.get('/api/health', async (_req: Request, res: Response) => {
+    const redisHealthy = await routeStorage.healthCheck();
+    return res.status(redisHealthy ? 200 : 503).json({
+      status: redisHealthy ? 'ok' : 'degraded',
+      redis: redisHealthy ? 'ok' : 'unavailable',
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   app.get("/api/geocode/search", async (req: Request, res: Response) => {
     const query = typeof req.query.q === "string"
@@ -178,7 +246,32 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       return res.json({ coordinates });
     } catch (error) {
       console.error("Road route lookup failed:", error);
-      return res.status(502).json({ message: "Road route lookup is temporarily unavailable." });
+      // Keep the rider/driver map useful if the external routing provider is
+      // unavailable. The client can render this degraded route immediately,
+      // while the next route refresh can try Geoapify again.
+      return res.json({
+        coordinates: parsedWaypoints.map(({ lat, lng }) => ({
+          latitude: lat,
+          longitude: lng,
+        })),
+        fallback: true,
+        message: "Live road routing is temporarily unavailable; showing a direct route.",
+      });
+    }
+  });
+
+  app.post("/api/routes/eta", async (req: Request, res: Response) => {
+    const from = { lat: Number(req.body?.from?.lat), lng: Number(req.body?.from?.lng) };
+    const to = { lat: Number(req.body?.to?.lat), lng: Number(req.body?.to?.lng) };
+    if (![from.lat, from.lng, to.lat, to.lng].every(Number.isFinite)) {
+      return res.status(400).json({ message: "Valid origin and destination coordinates are required." });
+    }
+    try {
+      const travelSeconds = await estimateGeoapifyTravelSeconds(from, to);
+      return res.json({ travelSeconds, calculatedAt: new Date().toISOString() });
+    } catch (error) {
+      console.error("Scheduled pickup ETA failed:", error);
+      return res.status(503).json({ message: "Road ETA is temporarily unavailable." });
     }
   });
 
@@ -191,7 +284,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       }
       const user = await routeStorage.createUser({
         username: parsed.username,
-        password: parsed.password,
+        password: await hashPassword(parsed.password),
         role: parsed.role,
         fullName: parsed.fullName,
         phone: parsed.phone,
@@ -202,7 +295,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
         totalEarnings: 0,
       });
       const { password: _, ...safe } = user;
-      return res.json(safe);
+      return res.json({ user: safe, accessToken: signAccessToken(user) });
     } catch (e: any) {
       return res.status(400).json({ message: e.message || "Invalid data" });
     }
@@ -212,26 +305,43 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     try {
       const parsed = loginSchema.parse(req.body);
       const user = await routeStorage.getUserByUsername(parsed.username);
-      if (!user || user.password !== parsed.password) {
+      if (!user || !(await verifyPassword(parsed.password, user.password))) {
         return res.status(401).json({ message: "Invalid credentials" });
       }
+      if (!user.password.startsWith('scrypt$')) {
+        await routeStorage.updateUser(user.id, { password: await hashPassword(parsed.password) });
+      }
       const { password: _, ...safe } = user;
-      return res.json(safe);
+      return res.json({ user: safe, accessToken: signAccessToken(user) });
     } catch (e: any) {
       return res.status(400).json({ message: e.message || "Invalid data" });
     }
   });
 
+  app.get("/api/auth/me", async (req: Request, res: Response) => {
+    const userId = res.locals.auth?.sub;
+    const user = userId ? await routeStorage.getUser(userId) : undefined;
+    if (!user) return res.status(401).json({ message: "Account no longer exists" });
+    return res.json(publicUser(user));
+  });
+
   app.get("/api/user/:id", async (req: Request, res: Response) => {
-    const user = await routeStorage.getUser(getRouteParam(req.params.id));
+    const userId = getRouteParam(req.params.id);
+    const user = await routeStorage.getUser(userId);
     if (!user) return res.status(404).json({ message: "User not found" });
-    const { password: _, ...safe } = user;
-    return res.json(safe);
+    const canViewPublicDriver = res.locals.auth?.role === 'rider' && user.role === 'driver';
+    if (res.locals.auth && !isAdmin(res) && authenticatedUserId(res) !== userId && !canViewPublicDriver) {
+      return res.status(403).json({ message: "You can only view your own account" });
+    }
+    return res.json(publicUser(user));
   });
 
   app.put("/api/user/:id/vehicle", async (req: Request, res: Response) => {
     try {
       const userId = getRouteParam(req.params.id);
+      if (res.locals.auth && authenticatedUserId(res) !== userId && !isAdmin(res)) {
+        return res.status(403).json({ message: "You can only update your own vehicle" });
+      }
       const user = await routeStorage.getUser(userId);
 
       if (!user) {
@@ -258,10 +368,49 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     }
   });
 
+  app.put("/api/drivers/me/vehicle-photos", async (_req: Request, res: Response) => {
+    const driverId = authenticatedDriverId(res);
+    if (!driverId) return res.status(403).json({ message: "Only authenticated drivers can upload vehicle photos." });
+    try {
+      const parsed = vehiclePhotosSchema.parse(_req.body);
+      const updated = await routeStorage.updateUser(driverId, { vehiclePhotos: parsed.photos });
+      if (!updated) return res.status(404).json({ message: "Driver account not found." });
+      return res.json({ vehiclePhotos: updated.vehiclePhotos ?? [] });
+    } catch (e: any) {
+      return res.status(400).json({ message: e.message || "Invalid vehicle photos." });
+    }
+  });
+
+  app.put("/api/drivers/me/kyc", async (req: Request, res: Response) => {
+    const driverId = authenticatedDriverId(res);
+    if (!driverId) return res.status(403).json({ message: "Only authenticated drivers can submit KYC." });
+    try {
+      const parsed = driverKycSchema.parse(req.body);
+      const updated = await routeStorage.updateUser(driverId, {
+        kyc: {
+          ...parsed,
+          status: 'pending',
+          submittedAt: new Date().toISOString(),
+          reviewedAt: undefined,
+          reviewedBy: undefined,
+          rejectionReason: undefined,
+        },
+      });
+      if (!updated) return res.status(404).json({ message: "Driver account not found." });
+      return res.json({ kyc: { status: updated.kyc?.status, submittedAt: updated.kyc?.submittedAt } });
+    } catch (e: any) {
+      return res.status(400).json({ message: e.message || "Invalid KYC documents." });
+    }
+  });
+
   app.put("/api/user/:id/location", async (req: Request, res: Response) => {
     try {
+      const userId = getRouteParam(req.params.id);
+      if (res.locals.auth && authenticatedUserId(res) !== userId) {
+        return res.status(403).json({ message: "You can only update your own location" });
+      }
       const parsed = updateLocationSchema.parse(req.body);
-      const user = await routeStorage.updateUser(getRouteParam(req.params.id), {
+      const user = await routeStorage.updateUser(userId, {
         currentLocation: { lat: parsed.lat, lng: parsed.lng },
       });
       if (!user) return res.status(404).json({ message: "User not found" });
@@ -274,6 +423,9 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
   app.put("/api/user/:id/online", async (req: Request, res: Response) => {
     try {
       const userId = getRouteParam(req.params.id);
+      if (res.locals.auth && authenticatedUserId(res) !== userId && !isAdmin(res)) {
+        return res.status(403).json({ message: "You can only update your own driver status" });
+      }
       const { isOnline } = req.body;
 
       if (typeof isOnline !== "boolean") {
@@ -367,17 +519,24 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       const parsed = requestRideSchema.parse(req.body);
       const riderId = req.body.riderId;
       if (!riderId) return res.status(400).json({ message: "riderId required" });
+      if (res.locals.auth && (res.locals.auth.role !== 'rider' || authenticatedUserId(res) !== riderId)) {
+        return res.status(403).json({ message: "Only the authenticated rider can create this ride" });
+      }
 
       const rider = await routeStorage.getUser(riderId);
       if (!rider) return res.status(404).json({ message: "Rider not found" });
 
       const ride = await routeStorage.createRide({
         riderId,
-        status: 'requested',
+        status: parsed.scheduledAt ? 'scheduled' : 'requested',
         pickup: parsed.pickup,
         dropoff: parsed.dropoff,
-        rideType: parsed.rideType,
+        rideType: parsed.serviceType === 'parcel' ? 'shared' : parsed.rideType,
+        serviceType: parsed.serviceType,
         additionalPassengers: parsed.additionalPassengers,
+        passengerCount: parsed.passengerCount,
+        parcel: parsed.parcel,
+        scheduledAt: parsed.scheduledAt,
         riderName: rider.fullName,
       });
 
@@ -389,9 +548,9 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
         read: false,
       });
 
-      // Persist dispatch state. The scheduler broadcasts to all eligible
-      // nearby drivers and expands the radius when nobody accepts.
-      await routeStorage.startRideDispatch(ride.id);
+      // Scheduled rides stay queued until their pickup time. Immediate rides
+      // enter normal dispatch immediately.
+      if (ride.status === 'requested') await routeStorage.startRideDispatch(ride.id);
 
       return res.json(ride);
     } catch (e: any) {
@@ -402,11 +561,11 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
   app.put("/api/rides/:id/payment", async (req: Request, res: Response) => {
     const ride = await routeStorage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
-    if (ride.riderId !== req.body.riderId) {
+    if (res.locals.auth && ride.riderId !== authenticatedUserId(res)) {
       return res.status(403).json({ message: "Only the rider can submit this payment" });
     }
-    if (ride.status !== 'in_progress') {
-      return res.status(409).json({ message: "Payment can be initiated after the ride has started" });
+    if (ride.status !== 'in_progress' && !ride.cancellationPaymentRequired) {
+      return res.status(409).json({ message: "Payment can be initiated after the ride has started or after an assigned ride is cancelled" });
     }
 
     const method = req.body.paymentMethod;
@@ -443,14 +602,215 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     return res.json(updated);
   });
 
-  app.put("/api/admin/rides/:id/payment", async (req: Request, res: Response) => {
-    const { status, adminId } = req.body as { status?: string; adminId?: string };
-    if (!adminId) return res.status(400).json({ message: "adminId required" });
+  app.post("/api/rides/:id/payment/initiate", async (req: Request, res: Response) => {
+    const ride = await routeStorage.getRide(getRouteParam(req.params.id));
+    if (!ride) return res.status(404).json({ message: "Ride not found" });
+    if (res.locals.auth && ride.riderId !== authenticatedUserId(res)) {
+      return res.status(403).json({ message: "Only the rider can initiate this payment" });
+    }
+    if (ride.status !== 'in_progress') {
+      return res.status(409).json({ message: "Payment can be initiated after the ride has started" });
+    }
 
-    const admin = await routeStorage.getUser(adminId);
+    const provider = req.body.provider as MobileMoneyProvider;
+    if (provider !== 'mpesa' && provider !== 'ecocash') {
+      return res.status(400).json({ message: "Choose mpesa or ecocash" });
+    }
+
+    const phone = typeof req.body.phone === 'string' ? req.body.phone.trim() : '';
+    const amount = Number(ride.fare?.totalFare);
+    if (!phone || !/^\+?[0-9][0-9\s-]{6,18}$/.test(phone)) {
+      return res.status(400).json({ message: "A valid mobile-money phone number is required" });
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ message: "This ride does not have a payable fare" });
+    }
+
+    const merchantReference = `ride:${ride.id}:${randomUUID()}`;
+    const forwardedProto = req.header('x-forwarded-proto') || req.protocol;
+    const forwardedHost = req.header('x-forwarded-host') || req.get('host');
+    const callbackUrl = process.env.PAYMENTS_CALLBACK_BASE_URL
+      ? `${process.env.PAYMENTS_CALLBACK_BASE_URL.replace(/\/$/, '')}/api/payments/webhooks/${provider}`
+      : `${forwardedProto}://${forwardedHost}/api/payments/webhooks/${provider}`;
+
+    try {
+      const result = await initiateMobileMoneyPayment(provider, {
+        amount: Math.round(amount * 100) / 100,
+        currency: 'LSL',
+        phone,
+        merchantReference,
+        callbackUrl,
+      });
+
+      const updated = await routeStorage.updateRide(ride.id, {
+        payment: {
+          method: provider,
+          status: result.status === 'paid' ? 'paid' : result.status === 'failed' ? 'failed' : 'pending_provider',
+          providerTransactionId: result.providerTransactionId,
+          providerConversationId: result.providerConversationId,
+          thirdPartyConversationId: result.thirdPartyConversationId,
+          phone,
+          amount,
+          transactionReference: result.providerTransactionId,
+          submittedAt: new Date().toISOString(),
+          ...(result.status === 'paid' ? { verifiedAt: new Date().toISOString() } : {}),
+        },
+      });
+
+      const eventType = result.status === 'paid' ? 'payment_paid' : result.status === 'failed' ? 'payment_failed' : 'payment_pending';
+      const event = await routeStorage.createEvent({
+        type: eventType,
+        rideId: ride.id,
+        userId: ride.riderId,
+        data: { provider, transactionId: result.providerTransactionId },
+        read: false,
+      });
+      publishRealtimeEvent(ride.riderId, { type: event.type, data: event.data });
+
+      return res.status(202).json({
+        ride: updated,
+        provider,
+        providerTransactionId: result.providerTransactionId,
+        status: result.status,
+        message: result.message,
+      });
+    } catch (error: any) {
+      return res.status(error?.name === 'ProviderNotConfiguredError' ? 503 : 502).json({
+        message: error?.message || "Mobile-money payment could not be initiated",
+      });
+    }
+  });
+
+  app.get("/api/rides/:id/payment/status", async (req: Request, res: Response) => {
+    const ride = await routeStorage.getRide(getRouteParam(req.params.id));
+    if (!ride) return res.status(404).json({ message: "Ride not found" });
+    if (res.locals.auth && (ride.riderId !== authenticatedUserId(res) || req.query.riderId !== authenticatedUserId(res))) {
+      return res.status(403).json({ message: "Only the rider can view this payment" });
+    }
+    if (ride.payment?.method === 'mpesa' && ride.payment.status === 'pending_provider') {
+      try {
+        const result = await queryMpesaTransaction({
+          transactionId: ride.payment.providerTransactionId,
+          conversationId: ride.payment.providerConversationId,
+          thirdPartyConversationId: ride.payment.thirdPartyConversationId,
+        });
+        const status = result.status === 'paid' ? 'paid' : result.status === 'failed' ? 'failed' : 'pending_provider';
+        const updated = await routeStorage.updateRide(ride.id, {
+          payment: {
+            ...ride.payment,
+            status,
+            providerTransactionId: result.providerTransactionId || ride.payment.providerTransactionId,
+            providerConversationId: result.providerConversationId || ride.payment.providerConversationId,
+            thirdPartyConversationId: result.thirdPartyConversationId || ride.payment.thirdPartyConversationId,
+            ...(status === 'paid' ? { verifiedAt: new Date().toISOString() } : {}),
+          },
+        });
+        return res.json({ payment: updated?.payment || null });
+      } catch {
+        // Return the locally known state if the provider is temporarily unavailable.
+      }
+    }
+    return res.json({ payment: ride.payment || null });
+  });
+
+  app.post("/api/admin/rides/:id/payment/reversal", async (req: Request, res: Response) => {
+    const admin = await routeStorage.getUser(res.locals.auth?.sub);
     if (!admin || admin.role !== 'admin') {
       return res.status(403).json({ message: "Admin access required" });
     }
+
+    const ride = await routeStorage.getRide(getRouteParam(req.params.id));
+    if (!ride?.payment) return res.status(404).json({ message: "Payment not found" });
+    if (ride.payment.method !== 'mpesa' || ride.payment.status !== 'paid') {
+      return res.status(409).json({ message: "Only paid M-Pesa transactions can be reversed" });
+    }
+    if (!ride.payment.providerTransactionId || !ride.payment.thirdPartyConversationId) {
+      return res.status(409).json({ message: "M-Pesa transaction references are incomplete" });
+    }
+
+    try {
+      const result = await reverseMpesaTransaction({
+        transactionId: ride.payment.providerTransactionId,
+        amount: req.body.amount ? Number(req.body.amount) : undefined,
+        thirdPartyConversationId: ride.payment.thirdPartyConversationId,
+      });
+      const updated = await routeStorage.updateRide(ride.id, {
+        payment: {
+          ...ride.payment,
+          status: 'rejected',
+          reversedAt: new Date().toISOString(),
+          reversalTransactionId: result.transactionId,
+          verifiedBy: admin.id,
+        },
+      });
+      return res.json(updated);
+    } catch (error: any) {
+      return res.status(502).json({ message: error?.message || "M-Pesa reversal failed" });
+    }
+  });
+
+  app.post("/api/payments/webhooks/:provider", async (req: Request, res: Response) => {
+    const provider = getRouteParam(req.params.provider) as MobileMoneyProvider;
+    if (provider !== 'mpesa' && provider !== 'ecocash') {
+      return res.status(404).json({ message: "Unknown payment provider" });
+    }
+    if (!verifyProviderWebhook(provider, req.rawBody, req.header('x-provider-signature'))) {
+      return res.status(401).json({ message: "Invalid payment webhook signature" });
+    }
+
+    const webhook = parseProviderWebhook(req.body);
+    if (!webhook.providerTransactionId) {
+      return res.status(400).json({ message: "Payment transaction ID is required" });
+    }
+
+    const rides = await routeStorage.getAllRides();
+    const ride = rides.find((candidate) =>
+      candidate.payment?.providerTransactionId === webhook.providerTransactionId ||
+      (webhook.providerConversationId && candidate.payment?.providerConversationId === webhook.providerConversationId) ||
+      (webhook.thirdPartyConversationId && candidate.payment?.thirdPartyConversationId === webhook.thirdPartyConversationId) ||
+      (webhook.merchantReference && webhook.merchantReference.startsWith(`ride:${candidate.id}:`))
+    );
+    if (!ride?.payment) return res.status(404).json({ message: "Payment transaction not found" });
+
+    const status = webhook.status === 'paid' ? 'paid' : webhook.status === 'failed' ? 'failed' : 'pending_provider';
+    const updated = await routeStorage.updateRide(ride.id, {
+      payment: {
+        ...ride.payment,
+        status,
+        providerTransactionId: webhook.providerTransactionId || ride.payment.providerTransactionId,
+        providerConversationId: webhook.providerConversationId || ride.payment.providerConversationId,
+        thirdPartyConversationId: webhook.thirdPartyConversationId || ride.payment.thirdPartyConversationId,
+        transactionReference: webhook.transactionReference || ride.payment.transactionReference,
+        ...(status === 'paid' ? { verifiedAt: new Date().toISOString() } : {}),
+      },
+    });
+
+    const eventType = status === 'paid' ? 'payment_paid' : status === 'failed' ? 'payment_failed' : 'payment_pending';
+    const event = await routeStorage.createEvent({
+      type: eventType,
+      rideId: ride.id,
+      userId: ride.riderId,
+      data: { provider, transactionId: webhook.providerTransactionId, status },
+      read: false,
+    });
+    publishRealtimeEvent(ride.riderId, { type: event.type, data: event.data });
+
+    if (provider === 'mpesa') {
+      return res.json({
+        output_OriginalConversationID: webhook.providerConversationId || ride.payment.providerConversationId,
+        output_ResponseCode: 'INS-GAR-0',
+        output_ResponseDesc: 'Successfully Accepted Result',
+        output_ThirdPartyConversationID: webhook.thirdPartyConversationId || ride.payment.thirdPartyConversationId,
+      });
+    }
+
+    return res.json({ received: true, ride: updated });
+  });
+
+  app.put("/api/admin/rides/:id/payment", async (req: Request, res: Response) => {
+    const { status } = req.body as { status?: string };
+    const admin = await routeStorage.getUser(res.locals.auth?.sub);
+    if (!admin) return res.status(403).json({ message: "Admin access required" });
 
     if (status !== 'paid' && status !== 'rejected') {
       return res.status(400).json({ message: "Payment status must be paid or rejected" });
@@ -480,6 +840,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
   app.get("/api/rides/rider/:riderId/offers", async (req: Request, res: Response) => {
     try {
       const riderId = getRouteParam(req.params.riderId);
+      if (res.locals.auth && authenticatedUserId(res) !== riderId) return res.status(403).json({ message: "Access denied" });
       const offers = await routeStorage.getRideOffersForRider(riderId);
       return res.json(offers);
     } catch (e: any) {
@@ -488,6 +849,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
   });
 
   app.get("/api/rides/rider/:riderId", async (req: Request, res: Response) => {
+    if (res.locals.auth && authenticatedUserId(res) !== getRouteParam(req.params.riderId)) return res.status(403).json({ message: "Access denied" });
     const rides = await routeStorage.getRidesByRider(getRouteParam(req.params.riderId));
     const sanitized = rides.map(r => {
       if (r.review) return { ...r, review: { rating: r.review.rating, createdAt: r.review.createdAt } };
@@ -499,6 +861,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
   app.get("/api/rides/driver/:driverId/offers", async (req: Request, res: Response) => {
     try {
       const driverId = getRouteParam(req.params.driverId);
+      if (res.locals.auth && (res.locals.auth.role !== 'driver' || authenticatedUserId(res) !== driverId)) return res.status(403).json({ message: "Access denied" });
       const driver = await routeStorage.getUser(driverId);
 
       if (!driver) return res.status(404).json({ message: "Driver not found" });
@@ -507,8 +870,6 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       if (
         driver.role !== "driver" ||
         driver.suspended ||
-        !driver.isOnline ||
-        !driver.currentLocation ||
         !Number.isInteger(capacity) ||
         capacity < 1 ||
         capacity > 8
@@ -518,21 +879,78 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
 
       const driverRides = await routeStorage.getRidesByDriver(driverId);
       const activeRide = driverRides.find(
-        ride => !['completed', 'cancelled'].includes(ride.status)
+        ride => !['completed', 'cancelled', 'scheduled'].includes(ride.status)
       );
 
-      // A driver with an active PRIVATE ride cannot receive new offers.
-      // A driver with an active SHARED ride can still receive eligible offers.
-      if (activeRide && activeRide.rideType === 'private') {
-        return res.json([]);
+      // An active PRIVATE ride prevents new offers from being created for
+      // this driver, but must not hide offers already persisted in Redis.
+      // Those offers remain visible and are rejected by the atomic acceptance
+      // check until the driver's active ride is complete.
+      const hasActivePrivateRide = activeRide?.rideType === 'private';
+
+      // Reconcile pending requests during the driver's poll. This recovers
+      // offers if the dispatch scheduler was restarted or missed a tick.
+      const config = await routeStorage.getConfig();
+      // Clean expired queue entries before trying to re-advertise pending
+      // rides. Explicit rejection remains permanent; timeout does not.
+      await routeStorage.getDriverRideOffers(driverId);
+      const pendingRides = driver.isOnline && !hasActivePrivateRide
+        ? (await routeStorage.getAllRides()).filter(ride => ride.status === 'requested')
+        : [];
+      for (const ride of pendingRides) {
+        const requiredCapacity = ride.serviceType === 'parcel'
+          ? Math.max(1, Math.round(Number(ride.fare?.parcelMultiplier) || 1))
+          : Number(ride.passengerCount) || (1 + (Number(ride.additionalPassengers) || 0));
+        if (requiredCapacity > capacity || !driver.currentLocation) continue;
+        const distance = calculateDistance(
+          ride.pickup.lat,
+          ride.pickup.lng,
+          driver.currentLocation.lat,
+          driver.currentLocation.lng,
+        );
+        const dispatchRadius = ride.scheduledAt
+          ? config.dispatchMaximumRadiusKm
+          : config.dispatchInitialRadiusKm;
+        if (distance > dispatchRadius) continue;
+        const created = await routeStorage.createRideOffer(
+          driverId,
+          ride.id,
+          config.dispatchOfferWindowSeconds,
+        );
+        if (created) {
+          const event = await routeStorage.createEvent({
+            type: 'ride_requested',
+            rideId: ride.id,
+            userId: driverId,
+            data: {
+              pickup: ride.pickup,
+              dropoff: ride.dropoff,
+              fare: ride.fare,
+              riderName: ride.riderName,
+              serviceType: ride.serviceType,
+              scheduledAt: ride.scheduledAt,
+            },
+            read: false,
+          });
+          publishRealtimeEvent(driverId, { type: event.type, data: event.data });
+        }
       }
 
       // Remove queued offers that this vehicle can no longer accommodate.
       let offers = await routeStorage.getDriverRideOffers(driverId);
 
+      console.info('[RideNotification]', JSON.stringify({
+        stage: 'offers_returned',
+        driverId,
+        offerCount: offers.length,
+        offerIds: offers.map(offer => offer.id),
+        polledAt: Date.now(),
+      }));
+
       for (const offer of offers) {
-        const partySize = Number(offer.passengerCount) ||
-          (1 + (Number(offer.additionalPassengers) || 0));
+        const partySize = offer.serviceType === 'parcel'
+          ? Math.max(1, Math.round(Number(offer.fare?.parcelMultiplier) || 1))
+          : Number(offer.passengerCount) || (1 + (Number(offer.additionalPassengers) || 0));
 
         if (partySize > capacity) {
           await routeStorage.rejectRideOffer(driverId, offer.id);
@@ -540,8 +958,9 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       }
 
       offers = offers.filter(offer => {
-        const partySize = Number(offer.passengerCount) ||
-          (1 + (Number(offer.additionalPassengers) || 0));
+        const partySize = offer.serviceType === 'parcel'
+          ? Math.max(1, Math.round(Number(offer.fare?.parcelMultiplier) || 1))
+          : Number(offer.passengerCount) || (1 + (Number(offer.additionalPassengers) || 0));
         return partySize <= capacity;
       });
 
@@ -552,23 +971,64 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
   });
 
   app.get("/api/rides/driver/:driverId", async (req: Request, res: Response) => {
+    if (res.locals.auth && (res.locals.auth.role !== 'driver' || authenticatedUserId(res) !== getRouteParam(req.params.driverId))) return res.status(403).json({ message: "Access denied" });
     const rides = await routeStorage.getRidesByDriver(getRouteParam(req.params.driverId));
     const sanitized = rides.map(r => {
-      if (r.review) return { ...r, review: { rating: r.review.rating, createdAt: r.review.createdAt } };
+      if (r.review) return { ...r, review: { rating: r.review.rating, comment: r.review.comment, createdAt: r.review.createdAt } };
       return r;
     });
     return res.json(sanitized);
   });
 
   app.get("/api/rides/driver/:driverId/active", async (req: Request, res: Response) => {
+    if (res.locals.auth && (res.locals.auth.role !== 'driver' || authenticatedUserId(res) !== getRouteParam(req.params.driverId))) return res.status(403).json({ message: "Access denied" });
     const rides = await routeStorage.getRidesByDriver(getRouteParam(req.params.driverId));
-    const active = rides.filter(r => !['completed', 'cancelled'].includes(r.status));
+    const active = rides.filter(r => !['completed', 'cancelled', 'scheduled'].includes(r.status));
     return res.json(active.length > 0 ? active : null);
   });
 
+  app.get("/api/rides/driver/:driverId/scheduled", async (req: Request, res: Response) => {
+    const driverId = getRouteParam(req.params.driverId);
+    if (res.locals.auth && (res.locals.auth.role !== 'driver' || authenticatedUserId(res) !== driverId)) return res.status(403).json({ message: "Access denied" });
+    const driver = await routeStorage.getUser(driverId);
+    if (!driver || driver.role !== 'driver') return res.status(404).json({ message: 'Driver not found' });
+    const capacity = Number(driver.vehicleInfo?.seatingCapacity);
+    const driverRides = await routeStorage.getRidesByDriver(driverId);
+    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 8) {
+      return res.json(driverRides.filter(ride => ride.status === 'scheduled' && ride.scheduledAt));
+    }
+    const config = await routeStorage.getConfig();
+    // Expire old scheduled offers before creating the next polling round so
+    // a missed offer can be advertised again immediately.
+    await routeStorage.getDriverRideOffers(driverId);
+    const queued = driver.isOnline
+      ? (await routeStorage.getAllRides()).filter(ride => ride.status === 'scheduled' && ride.scheduledAt && !ride.driverId)
+      : [];
+    for (const ride of queued) {
+      const requiredCapacity = ride.serviceType === 'parcel'
+        ? Math.max(1, Math.round(Number(ride.fare?.parcelMultiplier) || 1))
+        : Number(ride.passengerCount) || (1 + (Number(ride.additionalPassengers) || 0));
+      const withinDispatchRadius = !driver.currentLocation || calculateDistance(
+        ride.pickup.lat,
+        ride.pickup.lng,
+        driver.currentLocation.lat,
+        driver.currentLocation.lng,
+      ) <= config.dispatchMaximumRadiusKm;
+      if (requiredCapacity <= capacity && withinDispatchRadius) {
+        await routeStorage.createRideOffer(driverId, ride.id, config.dispatchOfferWindowSeconds);
+      }
+    }
+    const assigned = await routeStorage.getRidesByDriver(driverId);
+    const offers = await routeStorage.getDriverRideOffers(driverId);
+    return res.json([...assigned.filter(ride => ride.status === 'scheduled' && ride.scheduledAt), ...offers.filter(ride => ride.status === 'scheduled' && ride.scheduledAt)]
+      .filter((ride, index, all) => all.findIndex(item => item.id === ride.id) === index)
+      .sort((a, b) => new Date(a.scheduledAt!).getTime() - new Date(b.scheduledAt!).getTime()));
+  });
+
   app.get("/api/rides/rider/:riderId/active", async (req: Request, res: Response) => {
+    if (res.locals.auth && (res.locals.auth.role !== 'rider' || authenticatedUserId(res) !== getRouteParam(req.params.riderId))) return res.status(403).json({ message: "Access denied" });
     const rides = await routeStorage.getRidesByRider(getRouteParam(req.params.riderId));
-    const active = rides.find(r => !['completed', 'cancelled'].includes(r.status));
+    const active = rides.find(r => !['completed', 'cancelled', 'scheduled'].includes(r.status));
     if (active) return res.json(active);
 
       const recentCompleted = rides
@@ -587,6 +1047,9 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
   app.get("/api/rides/:id", async (req: Request, res: Response) => {
     const ride = await routeStorage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
+    if (res.locals.auth && !isAdmin(res) && ride.riderId !== authenticatedUserId(res) && ride.driverId !== authenticatedUserId(res)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
     return res.json(ride);
   });
 
@@ -594,6 +1057,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     try {
       const driverId = req.body.driverId;
       if (!driverId) return res.status(400).json({ message: "driverId required" });
+      if (res.locals.auth && (res.locals.auth.role !== 'driver' || authenticatedUserId(res) !== driverId)) return res.status(403).json({ message: "Only the authenticated driver can reject this offer" });
 
       const rejected = await routeStorage.rejectRideOffer(
         driverId,
@@ -614,6 +1078,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     try {
       const { driverId } = req.body;
       if (!driverId) return res.status(400).json({ message: "driverId required" });
+      if (res.locals.auth && (res.locals.auth.role !== 'driver' || authenticatedUserId(res) !== driverId)) return res.status(403).json({ message: "Only the authenticated driver can accept this offer" });
 
       const rideId = getRouteParam(req.params.id);
       const ride = await routeStorage.getRide(rideId);
@@ -621,6 +1086,25 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
 
       const driver = await routeStorage.getUser(driverId);
       if (!driver) return res.status(404).json({ message: "Driver not found" });
+
+      if (ride.scheduledAt) {
+        const scheduledStart = new Date(ride.scheduledAt).getTime();
+        const scheduledDuration = Math.max(30, Number(ride.duration) || 30) * 60 * 1000;
+        const scheduledEnd = scheduledStart + scheduledDuration;
+        const existingScheduled = (await routeStorage.getRidesByDriver(driverId)).filter(existing =>
+          existing.id !== ride.id &&
+          existing.scheduledAt &&
+          !['completed', 'cancelled', 'no_drivers_available'].includes(existing.status)
+        );
+        const overlaps = existingScheduled.some(existing => {
+          const existingStart = new Date(existing.scheduledAt!).getTime();
+          const existingEnd = existingStart + Math.max(30, Number(existing.duration) || 30) * 60 * 1000;
+          return scheduledStart < existingEnd && existingStart < scheduledEnd;
+        });
+        if (overlaps) {
+          return res.status(409).json({ message: "You are not available for this scheduled pickup time." });
+        }
+      }
 
       const result = await routeStorage.acceptRideOffer(
         driverId,
@@ -663,12 +1147,61 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     }
   });
 
+  app.put("/api/rides/:id/release-scheduled", async (req: Request, res: Response) => {
+    const driverId = authenticatedDriverId(res);
+    if (!driverId || (req.body.driverId && req.body.driverId !== driverId)) {
+      return res.status(403).json({ message: "Only the assigned driver can release this scheduled ride" });
+    }
+
+    const rideId = getRouteParam(req.params.id);
+    const result = await routeStorage.releaseScheduledRide(driverId, rideId);
+    if (result.status !== 'released' || !result.ride) {
+      return res.status(result.status === 'not_owner' ? 403 : 409).json({
+        message: result.status === 'not_owner'
+          ? "You are not assigned to this scheduled ride"
+          : "This scheduled ride cannot be released",
+      });
+    }
+
+    await routeStorage.createEvent({
+      type: 'ride_requested',
+      rideId: result.ride.id,
+      userId: result.ride.riderId,
+      data: { status: 'replacement_driver_required', scheduledAt: result.ride.scheduledAt },
+      read: false,
+    });
+    return res.json(result.ride);
+  });
+
   app.put("/api/rides/:id/status", async (req: Request, res: Response) => {
     const { status } = req.body as { status: RideStatus };
     const ride = await routeStorage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
 
-    const updates: Partial<typeof ride> = { status };
+    if (res.locals.auth) {
+      if (status === 'cancelled' && (res.locals.auth.role !== 'rider' || ride.riderId !== authenticatedUserId(res))) {
+        return res.status(403).json({ message: "Only the rider can cancel this ride" });
+      }
+      if (status !== 'cancelled' && (res.locals.auth.role !== 'driver' || ride.driverId !== authenticatedUserId(res))) {
+        return res.status(403).json({ message: "Only the assigned driver can update this ride" });
+      }
+    }
+
+    if (status === 'cancelled') {
+      const riderId = typeof req.body.riderId === 'string' ? req.body.riderId : undefined;
+      if (riderId && riderId !== ride.riderId) {
+        return res.status(403).json({ message: "Only the rider can cancel this ride" });
+      }
+      if (['completed', 'cancelled'].includes(ride.status)) {
+        return res.status(409).json({ message: "Ride is already " + ride.status });
+      }
+    }
+
+    const assignedBeforeCancellation = status === 'cancelled' && Boolean(ride.driverId);
+    const updates: Partial<typeof ride> = {
+      status,
+      ...(assignedBeforeCancellation ? { cancellationPaymentRequired: true } : {}),
+    };
     if (status === 'arriving') {
       // no extra fields
     } else if (status === 'arrived') {
@@ -721,6 +1254,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
   });
 
   app.get("/api/events/:userId", async (req: Request, res: Response) => {
+    if (res.locals.auth && authenticatedUserId(res) !== getRouteParam(req.params.userId)) return res.status(403).json({ message: "Access denied" });
     const events = await routeStorage.getEventsByUser(getRouteParam(req.params.userId));
     return res.json(events);
   });
@@ -768,9 +1302,43 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     const allUsers = await routeStorage.getAllUsers();
     const filtered = allUsers.filter(u => u.role !== 'admin').map(u => {
       const { password: _, ...safe } = u;
+      if (safe.role === 'driver' && safe.kyc) {
+        safe.kyc = { status: safe.kyc.status, submittedAt: safe.kyc.submittedAt, reviewedAt: safe.kyc.reviewedAt, rejectionReason: safe.kyc.rejectionReason };
+      }
+      if (safe.role === 'driver') delete safe.vehiclePhotos;
       return safe;
     });
     return res.json(filtered);
+  });
+
+  app.get("/api/admin/kyc", async (_req: Request, res: Response) => {
+    const drivers = (await routeStorage.getAllUsers()).filter(user => user.role === 'driver' && user.kyc?.status && user.kyc.status !== 'not_submitted');
+    return res.json(drivers.map(({ password: _, ...driver }) => ({
+      id: driver.id,
+      fullName: driver.fullName,
+      phone: driver.phone,
+      vehicleInfo: driver.vehicleInfo,
+      vehiclePhotos: driver.vehiclePhotos ?? [],
+      kyc: driver.kyc,
+    })));
+  });
+
+  app.put("/api/admin/users/:id/kyc", async (req: Request, res: Response) => {
+    const userId = getRouteParam(req.params.id);
+    const user = await routeStorage.getUser(userId);
+    if (!user || user.role !== 'driver') return res.status(404).json({ message: "Driver not found." });
+    const status = req.body?.status;
+    if (status !== 'approved' && status !== 'rejected') return res.status(400).json({ message: "KYC status must be approved or rejected." });
+    const updated = await routeStorage.updateUser(userId, {
+      kyc: {
+        ...(user.kyc ?? { status: 'not_submitted' }),
+        status,
+        reviewedAt: new Date().toISOString(),
+        reviewedBy: res.locals.auth?.sub,
+        rejectionReason: status === 'rejected' ? String(req.body?.rejectionReason || 'Documents need correction.') : undefined,
+      },
+    });
+    return res.json({ kyc: updated?.kyc });
   });
 
   app.put("/api/admin/users/:id/suspend", async (req: Request, res: Response) => {
@@ -824,6 +1392,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     }
     const ride = await routeStorage.getRide(getRouteParam(req.params.id));
     if (!ride) return res.status(404).json({ message: "Ride not found" });
+    if (res.locals.auth && (res.locals.auth.role !== 'rider' || ride.riderId !== authenticatedUserId(res))) return res.status(403).json({ message: "Only the rider can review this ride" });
     if (ride.status !== 'completed') return res.status(400).json({ message: "Can only review completed rides" });
     if (ride.review) return res.status(400).json({ message: "Ride already reviewed" });
 
@@ -905,15 +1474,25 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     }
 
     const rideType = requestedRideType === 'shared' ? 'shared' : 'private';
+    const serviceType = req.query.serviceType === 'parcel' ? 'parcel' : 'ride';
+    let parcel;
+    if (serviceType === 'parcel') {
+      const values = ['parcelWeightKg', 'parcelLengthCm', 'parcelWidthCm', 'parcelHeightCm'].map(key => Number(req.query[key]));
+      if (values.some(value => !Number.isFinite(value) || value <= 0)) {
+        return res.status(400).json({ message: "Valid parcel weight and dimensions are required" });
+      }
+      parcel = { weightKg: values[0], lengthCm: values[1], widthCm: values[2], heightCm: values[3] };
+    }
     const distance = calculateDistance(pLat, pLng, dLat, dLng);
     const duration = Math.round(distance * (3 / 1.609344));
     const fare = await routeStorage.calculateFareForDistance(
-      distance, additionalPassengers, rideType
+      distance, additionalPassengers, rideType, parcel
     );
 
     return res.json({
       distance: Math.round(distance * 10) / 10,
       duration,
+      serviceType,
       ...fare,
     });
   });

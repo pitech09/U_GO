@@ -11,13 +11,14 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '@/lib/auth-context';
-import { apiRequest, getApiUrl } from '@/lib/query-client';
+import { apiRequest, authenticatedFetch, getApiUrl } from '@/lib/query-client';
 import Colors from '@/constants/colors';
 import type { Ride } from '@shared/schema';
 import DriverTabBar from '@/components/DriverTabBar';
 import { router } from 'expo-router';
 
 const statusLabels: Record<Ride['status'], string> = {
+  scheduled: 'Scheduled',
   requested: 'Requested',
   accepted: 'Accepted',
   arriving: 'Heading to pickup',
@@ -41,7 +42,7 @@ export default function DriverActiveScreen() {
     if (!user?.id) return;
     try {
       const baseUrl = getApiUrl();
-      const response = await fetch(
+      const response = await authenticatedFetch(
         new URL(`/api/rides/driver/${user.id}/active`, baseUrl).toString(),
         { cache: 'no-store' }
       );
@@ -118,10 +119,11 @@ export default function DriverActiveScreen() {
                   <View style={styles.statusDot} />
                   <Text style={styles.statusText}>{statusLabels[ride.status]}</Text>
                 </View>
-                <Text style={styles.passengers}>{ride.passengerCount || 1} passenger{ride.passengerCount === 1 ? '' : 's'}</Text>
+                <Text style={styles.passengers}>{ride.serviceType === 'parcel' ? 'Parcel' : `${ride.passengerCount || 1} passenger${ride.passengerCount === 1 ? '' : 's'}`}</Text>
               </View>
               <RouteRow icon="location" label="Pickup" address={ride.pickup.address} />
               <RouteRow icon="flag" label="Drop-off" address={ride.dropoff.address} />
+              <Text style={styles.tripDetails}>{ride.serviceType === 'parcel' ? `Parcel · ${ride.parcel?.weightKg} kg · ${ride.fare?.parcelMultiplier || 1} seat unit(s)` : `${ride.rideType === 'shared' ? 'Shared' : 'Private'} booking`}{ride.scheduledAt ? ` · Scheduled ${new Date(ride.scheduledAt).toLocaleString()}` : ''}</Text>
               <View style={styles.fareRow}>
                 <Text style={styles.fareLabel}>Your earnings</Text>
                 <Text style={styles.fareValue}>M{ride.fare?.driverEarnings.toFixed(2) ?? '0.00'}</Text>
@@ -166,6 +168,7 @@ function ActionButton({ label, onPress }: { label: string; onPress: () => void }
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   content: { paddingHorizontal: 16, paddingBottom: 32, gap: 16 },
+  tripDetails: { color: Colors.textLight, fontSize: 12, marginBottom: 8 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   headerTitleGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   backButton: { width: 40, height: 40, borderRadius: 12, backgroundColor: Colors.surface, alignItems: 'center', justifyContent: 'center' },

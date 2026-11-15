@@ -14,7 +14,7 @@ import * as Location from 'expo-location';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '@/lib/auth-context';
-import { apiRequest, getApiUrl } from '@/lib/query-client';
+import { apiRequest, authenticatedFetch, getApiUrl } from '@/lib/query-client';
 import Colors from '@/constants/colors';
 import Animated, { SlideInDown, FadeIn, FadeInUp, FadeInDown } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
@@ -22,6 +22,7 @@ import type { Ride } from '@shared/schema';
 import { startIncomingRideAlert, stopIncomingRideAlert } from '@/lib/sound-notifications';
 import AppModal, { useAppModal } from '@/components/AppModal';
 import DriverTabBar from '@/components/DriverTabBar';
+import { connectRealtime } from '@/lib/realtime';
 
 const { width } = Dimensions.get('window');
 const LATITUDE_DELTA = 0.015;
@@ -36,12 +37,15 @@ export default function DriverScreen() {
   const alertedRideIdsRef = useRef<Set<string>>(new Set());
   const previousAvailableRideIdsRef = useRef<Set<string>>(new Set());
   const activeRidesRef = useRef<Ride[]>([]);
+  const activeRideRequestRef = useRef(false);
+  const offersRequestRef = useRef(false);
 
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [permissionStatus, setPermissionStatus] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState(user?.isOnline || false);
   const [phase, setPhase] = useState<DriverPhase>('dashboard');
   const [pendingRides, setPendingRides] = useState<Ride[]>([]);
+  const [scheduledRequests, setScheduledRequests] = useState<Ride[]>([]);
   const [activeRides, setActiveRides] = useState<Ride[]>([]);
   const [selectedRideId, setSelectedRideId] = useState<string | null>(null);
   const [earnings, setEarnings] = useState({ today: 0, total: user?.totalEarnings || 0, rides: user?.totalRides || 0 });
@@ -56,6 +60,27 @@ export default function DriverScreen() {
     requestLocation();
   }, []);
 
+  // Restore the server-side availability state whenever the driver screen is
+  // mounted again after visiting another driver tab.
+  useEffect(() => {
+    if (!user?.id || user.role !== 'driver') return;
+    let cancelled = false;
+    const restoreAvailability = async () => {
+      try {
+        const res = await apiRequest('GET', '/api/auth/me');
+        const fresh = await res.json();
+        if (cancelled || fresh?.id !== user.id) return;
+        const online = fresh.isOnline === true;
+        setIsOnline(online);
+        setPhase(online ? 'online' : 'dashboard');
+      } catch {
+        // Keep the local state if the server is temporarily unavailable.
+      }
+    };
+    void restoreAvailability();
+    return () => { cancelled = true; };
+  }, [user?.id]);
+
   useEffect(() => {
     return () => {
       stopIncomingRideAlert();
@@ -67,14 +92,29 @@ export default function DriverScreen() {
     fetchRideHistory();
     checkActiveRide();
     refreshUser();
+    if (isOnline) fetchScheduledRequests();
 
     const interval = setInterval(() => {
       checkActiveRide();
-        if (isOnline) fetchPendingRides();
+      fetchRideHistory();
+      if (isOnline) {
+        fetchPendingRides();
+        fetchScheduledRequests();
+      }
     }, 4000);
 
     return () => clearInterval(interval);
   }, [user?.id, isOnline]);
+
+  useEffect(() => {
+    if (!user?.id || user.role !== 'driver') return;
+    let closed = false;
+    let closeSocket: () => void = () => undefined;
+    void connectRealtime(message => {
+      if (!closed && message.type === 'ride_requested') void fetchPendingRides();
+    }).then(close => { if (closed) close(); else closeSocket = close; });
+    return () => { closed = true; closeSocket(); };
+  }, [user?.id, user?.role, isOnline]);
 
   useEffect(() => {
     setEarnings({
@@ -108,12 +148,14 @@ export default function DriverScreen() {
             setPermissionStatus('granted');
           },
           () => {
-            setLocation({ lat: 37.7749, lng: -122.4194 });
+            // Keep web testing and Lesotho deployments inside the dispatch
+            // area when browser geolocation is unavailable.
+            setLocation({ lat: -29.315, lng: 27.486 });
             setPermissionStatus('granted');
           }
         );
       } catch {
-        setLocation({ lat: 37.7749, lng: -122.4194 });
+        setLocation({ lat: -29.315, lng: 27.486 });
         setPermissionStatus('granted');
       }
       return;
@@ -146,6 +188,7 @@ export default function DriverScreen() {
       if (newState) {
         setPhase('online');
         fetchPendingRides();
+        fetchScheduledRequests();
       } else {
         setPhase('dashboard');
         alertedRideIdsRef.current.clear();
@@ -159,14 +202,24 @@ export default function DriverScreen() {
   };
 
   const fetchPendingRides = async () => {
+    if (!user?.id || offersRequestRef.current) return;
+    offersRequestRef.current = true;
     try {
       const baseUrl = getApiUrl();
-      const url = new URL('/api/rides/available', baseUrl);
-      const res = await fetch(url.toString(), { cache: 'no-store' });
+      // Read this driver's dispatched offers, rather than the global request
+      // list. This is important for scheduled bookings and capacity filtering.
+      const url = new URL(`/api/rides/driver/${user?.id}/offers`, baseUrl);
+      const res = await authenticatedFetch(url.toString(), { cache: 'no-store' });
+      if (!res.ok) return;
       const data = await res.json();
       const rides = Array.isArray(data) ? data : [];
-      setPendingRides(rides);
+      // Scheduled offers are visible in New Requests, but stay out of the
+      // immediate home popup and its sound alert.
+      const immediateRides = rides.filter((ride: Ride) => !ride.scheduledAt);
+      setPendingRides(immediateRides);
 
+      // Scheduled offers use the same delivery path as immediate offers. They
+      // stay out of the immediate card but remain eligible for alerting.
       const availableIds = new Set(rides.map((ride: Ride) => ride.id));
       const hasNewRide = [...availableIds].some(
         rideId => !previousAvailableRideIdsRef.current.has(rideId)
@@ -188,21 +241,47 @@ export default function DriverScreen() {
       }
 
       if (isOnline && hasNewRide) {
+        console.info('[RideNotification]', JSON.stringify({
+          stage: 'notification_handler',
+          driverId: user.id,
+          offerIds: [...availableIds],
+          handledAt: Date.now(),
+        }));
         startIncomingRideAlert();
       }
 
       if (availableIds.size === 0) {
         stopIncomingRideAlert();
       }
+    } catch {
+      // Preserve the last known offers during a temporary network failure.
+    } finally {
+      offersRequestRef.current = false;
+    }
+  };
+
+  const fetchScheduledRequests = async () => {
+    if (!user?.id) return;
+    try {
+      const url = new URL(`/api/rides/driver/${user.id}/scheduled`, getApiUrl());
+      const res = await authenticatedFetch(url.toString(), { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      setScheduledRequests(
+        (Array.isArray(data) ? data : []).filter((ride: Ride) => !ride.driverId)
+      );
     } catch {}
   };
 
   const checkActiveRide = async () => {
     if (!user?.id) return;
+    if (activeRideRequestRef.current) return;
+    activeRideRequestRef.current = true;
     try {
       const baseUrl = getApiUrl();
       const url = new URL(`/api/rides/driver/${user.id}/active`, baseUrl);
-      const res = await fetch(url.toString(), { cache: 'no-store' });
+      const res = await authenticatedFetch(url.toString(), { cache: 'no-store' });
+      if (!res.ok) return;
       const data: Ride[] = await res.json();
       if (Array.isArray(data) && data.length > 0) {
         setActiveRides(data);
@@ -215,7 +294,11 @@ export default function DriverScreen() {
         setActiveRides([]);
         setSelectedRideId(null);
       }
-    } catch {}
+    } catch {
+      // Keep the last known active ride during a temporary network failure.
+    } finally {
+      activeRideRequestRef.current = false;
+    }
   };
 
   const fetchRideHistory = async () => {
@@ -246,17 +329,51 @@ export default function DriverScreen() {
 
       const res = await apiRequest('PUT', `/api/rides/${rideId}/accept`, { driverId: user.id });
       const ride = await res.json();
+
+      // Scheduled bookings are reservations, not an active pickup. Keep the
+      // driver on the availability screen so they can continue receiving
+      // immediate requests until the scheduled pickup window begins.
+      if (ride.scheduledAt && new Date(ride.scheduledAt).getTime() > Date.now()) {
+        setActiveRides(prev => prev.filter(activeRide => activeRide.id !== ride.id));
+        setSelectedRideId(null);
+        setPhase(isOnline ? 'online' : 'dashboard');
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        await fetchRideHistory();
+        return;
+      }
+
       setActiveRides(prev => [...prev, ride]);
       setSelectedRideId(ride.id);
       setPhase('navigating');
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      await apiRequest('PUT', `/api/rides/${rideId}/status`, { status: 'arriving' });
+      if (!ride.scheduledAt || new Date(ride.scheduledAt).getTime() <= Date.now()) {
+        await apiRequest('PUT', `/api/rides/${rideId}/status`, { status: 'arriving' });
+      }
     } catch (e: any) {
       const msg = e.message || 'Could not accept ride';
       showAlert('Error', msg);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const rejectRide = async (rideId: string) => {
+    if (!user?.id) return;
+    try {
+      const res = await apiRequest('PUT', `/api/rides/${rideId}/reject`, { driverId: user.id });
+      if (res.ok) {
+        setPendingRides(prev => prev.filter(ride => ride.id !== rideId));
+        setScheduledRequests(prev => prev.filter(ride => ride.id !== rideId));
+        alertedRideIdsRef.current.delete(rideId);
+        previousAvailableRideIdsRef.current.delete(rideId);
+        stopIncomingRideAlert();
+      } else {
+        const body = await res.json().catch(() => ({ message: 'Request is no longer available' }));
+        showAlert('Reject failed', body.message || 'Request is no longer available');
+      }
+    } catch (e: any) {
+      showAlert('Reject failed', e.message || 'Could not reject request');
     }
   };
 
@@ -418,9 +535,34 @@ export default function DriverScreen() {
             </View>
           )}
 
+          <Pressable style={styles.verificationButton} onPress={() => router.push('/driver-verification' as never)}>
+            <Ionicons name="shield-checkmark-outline" size={20} color={Colors.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.verificationTitle}>Vehicle & KYC verification</Text>
+              <Text style={styles.verificationSub}>Upload car photos and personal documents</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={Colors.textLight} />
+          </Pressable>
+
+          {rideHistory.filter(ride => ride.scheduledAt && !['completed', 'cancelled', 'no_drivers_available'].includes(ride.status)).length > 0 && (
+            <View style={styles.scheduledDriverSection}>
+              <View style={styles.scheduledDriverHeader}><Ionicons name="calendar" size={18} color={Colors.primary} /><Text style={styles.scheduledDriverTitle}>Your scheduled trips</Text></View>
+              {rideHistory.filter(ride => ride.scheduledAt && !['completed', 'cancelled', 'no_drivers_available'].includes(ride.status)).slice(0, 4).map(ride => (
+                <View key={ride.id} style={styles.scheduledDriverCard}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.scheduledDriverTime}>{new Date(ride.scheduledAt!).toLocaleString()}</Text>
+                    <Text style={styles.scheduledDriverRoute} numberOfLines={1}>{ride.pickup.address} → {ride.dropoff.address}</Text>
+                    <Text style={styles.scheduledDriverMeta}>{ride.serviceType === 'parcel' ? `Parcel · ${ride.parcel?.weightKg} kg` : `${ride.rideType === 'shared' ? 'Shared' : 'Private'} · ${ride.passengerCount || 1} passenger(s)`}</Text>
+                  </View>
+                  <Text style={styles.scheduledDriverFare}>M{ride.fare?.driverEarnings.toFixed(2) ?? '0.00'}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
           {rideHistory.length > 0 && (
             <View style={styles.historySection}>
-              <Text style={styles.historyTitle}>Recent Rides</Text>
+              <Text style={styles.historyTitle}>Ride History & Reviews</Text>
               {rideHistory.slice(0, 5).map((ride) => (
                 <View key={ride.id} style={styles.historyItem}>
                   <View style={styles.historyIcon}>
@@ -437,6 +579,12 @@ export default function DriverScreen() {
                     <Text style={styles.historyTime}>
                       {new Date(ride.createdAt).toLocaleDateString()}
                     </Text>
+                    {ride.review && (
+                      <>
+                        <Text style={styles.historyReviewRating}>{'★'.repeat(ride.review.rating)}{'☆'.repeat(5 - ride.review.rating)} · {ride.review.rating}/5</Text>
+                        {ride.review.comment && <Text style={styles.historyReviewComment} numberOfLines={2}>{ride.review.comment}</Text>}
+                      </>
+                    )}
                   </View>
                   {ride.fare && (
                     <Text style={styles.historyEarning}>
@@ -603,8 +751,9 @@ export default function DriverScreen() {
               >
                 <View style={styles.activeTripCardHeader}>
                   <Text style={styles.activeTripStatus}>{driverRideStatusLabel(ride.status)}</Text>
-                  <Text style={styles.activeTripPassengers}>{ride.passengerCount || 1} pax</Text>
+                  <Text style={styles.activeTripPassengers}>{ride.serviceType === 'parcel' ? 'Parcel' : `${ride.passengerCount || 1} pax`}</Text>
                 </View>
+                <Text style={styles.activeTripDetails} numberOfLines={2}>{ride.serviceType === 'parcel' ? `Parcel · ${ride.parcel?.weightKg} kg · ${ride.parcel?.lengthCm} × ${ride.parcel?.widthCm} × ${ride.parcel?.heightCm} cm` : `${ride.rideType === 'shared' ? 'Shared' : 'Private'} ride`}{ride.scheduledAt ? ` · Pickup ${new Date(ride.scheduledAt).toLocaleString()}` : ''}</Text>
                 <Text style={styles.activeTripPickup} numberOfLines={1}>{ride.pickup.address}</Text>
                 <View style={styles.activeTripRouteLine} />
                 <View style={styles.activeTripDestinationRow}>
@@ -624,6 +773,24 @@ export default function DriverScreen() {
             ))}
           </ScrollView>
         </View>
+      )}
+
+      {phase === 'online' && scheduledRequests.length > 0 && (
+        <Pressable
+          style={[styles.scheduledRequestBanner, { top: topInset + (activeRides.length > 0 ? 280 : 112) }]}
+          onPress={() => router.replace('/driver-offers')}
+        >
+          <View style={styles.scheduledRequestIcon}>
+            <Ionicons name="calendar" size={18} color={Colors.secondary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.scheduledRequestTitle}>Scheduled ride request</Text>
+            <Text style={styles.scheduledRequestText} numberOfLines={1}>
+              {new Date(scheduledRequests[0].scheduledAt!).toLocaleString()} · Tap to review
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={Colors.primary} />
+        </Pressable>
       )}
 
       {phase === 'online' && pendingRides.length > 0 && (
@@ -656,20 +823,25 @@ export default function DriverScreen() {
                   </View>
                 </View>
               )}
-              <Pressable
-                style={({ pressed }) => [styles.acceptBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
-                onPress={() => acceptRide(ride.id)}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator size="small" color={Colors.secondary} />
-                ) : (
-                  <>
-                    <Ionicons name="checkmark" size={20} color={Colors.secondary} />
-                    <Text style={styles.acceptBtnText}>Accept Ride</Text>
-                  </>
-                )}
-              </Pressable>
+              <Text style={styles.requestDetails}>{ride.serviceType === 'parcel' ? `Parcel delivery · ${ride.parcel?.weightKg} kg · ${ride.fare?.parcelMultiplier || 1} seat unit(s)` : `${ride.rideType === 'shared' ? 'Shared' : 'Private'} ride · ${ride.passengerCount || 1} passenger(s)`}{ride.scheduledAt ? ` · Pickup ${new Date(ride.scheduledAt).toLocaleString()}` : ''}</Text>
+              <View style={styles.requestActions}>
+                <Pressable
+                  style={({ pressed }) => [styles.acceptBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
+                  onPress={() => acceptRide(ride.id)}
+                  disabled={loading}
+                >
+                  {loading ? <ActivityIndicator size="small" color={Colors.secondary} /> : <Ionicons name="checkmark" size={20} color={Colors.secondary} />}
+                  <Text style={styles.acceptBtnText}>{loading ? 'Processing...' : 'Accept Ride'}</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.rejectRequestBtn, pressed && styles.btnPressed, loading && styles.btnDisabled]}
+                  onPress={() => rejectRide(ride.id)}
+                  disabled={loading}
+                >
+                  <Ionicons name="close" size={20} color="#E53935" />
+                  <Text style={styles.rejectRequestText}>Reject</Text>
+                </Pressable>
+              </View>
             </View>
           ))}
         </Animated.View>
@@ -928,6 +1100,22 @@ const styles = StyleSheet.create({
   vehicleSub: {
     fontSize: 13, fontFamily: 'Inter_400Regular', color: Colors.textLight, marginTop: 2,
   },
+  verificationButton: {
+    flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: 'rgba(54, 214, 197, 0.08)',
+    borderRadius: 16, padding: 15, marginBottom: 20, borderWidth: 1, borderColor: 'rgba(54, 214, 197, 0.18)',
+  },
+  verificationTitle: { color: Colors.textWhite, fontFamily: 'Inter_600SemiBold', fontSize: 14 },
+  verificationSub: { color: Colors.textLight, fontSize: 12, marginTop: 3 },
+  scheduledDriverSection: { backgroundColor: 'rgba(54, 214, 197, 0.08)', borderRadius: 16, padding: 14, marginBottom: 20, gap: 8 },
+  scheduledDriverHeader: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  scheduledDriverTitle: { color: Colors.textWhite, fontFamily: 'Inter_600SemiBold', fontSize: 14 },
+  scheduledDriverCard: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 10, padding: 9 },
+  scheduledDriverTime: { color: Colors.primary, fontFamily: 'Inter_600SemiBold', fontSize: 12 },
+  scheduledDriverRoute: { color: Colors.textWhite, fontSize: 11, marginTop: 2 },
+  scheduledDriverMeta: { color: Colors.textLight, fontSize: 10, marginTop: 2 },
+  scheduledDriverFare: { color: Colors.textWhite, fontFamily: 'Inter_700Bold', fontSize: 13 },
+  activeTripDetails: { color: Colors.textLight, fontSize: 11, lineHeight: 16, marginBottom: 5 },
+  requestDetails: { color: Colors.textLight, fontSize: 12, lineHeight: 17, marginBottom: 10 },
   historySection: { marginBottom: 20 },
   historyTitle: {
     fontSize: 18, fontFamily: 'Inter_700Bold', color: Colors.textWhite, marginBottom: 12,
@@ -947,6 +1135,8 @@ const styles = StyleSheet.create({
   historyEarning: {
     fontSize: 15, fontFamily: 'Inter_700Bold', color: Colors.primary,
   },
+  historyReviewRating: { fontSize: 12, fontFamily: 'Inter_600SemiBold', color: Colors.primary, marginTop: 5 },
+  historyReviewComment: { fontSize: 12, fontFamily: 'Inter_400Regular', color: Colors.textLight, marginTop: 3, lineHeight: 17 },
   compSection: { marginBottom: 20 },
   compTitle: {
     fontSize: 18, fontFamily: 'Inter_700Bold', color: Colors.textWhite, marginBottom: 12,
@@ -1057,6 +1247,7 @@ const styles = StyleSheet.create({
     fontSize: 20, fontFamily: 'Inter_700Bold', color: Colors.text, marginBottom: 12,
   },
   requestCard: { gap: 14 },
+  requestActions: { flexDirection: 'row', gap: 10 },
   requestRoute: { gap: 4 },
   routePoint: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   greenDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: Colors.primary },
@@ -1079,6 +1270,13 @@ const styles = StyleSheet.create({
   acceptBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     backgroundColor: Colors.primary, paddingVertical: 16, borderRadius: 14,
+  },
+  rejectRequestBtn: {
+    flex: 0.7, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    backgroundColor: 'rgba(229, 57, 53, 0.1)', paddingVertical: 16, borderRadius: 14,
+  },
+  rejectRequestText: {
+    fontSize: 15, fontFamily: 'Inter_600SemiBold', color: '#E53935',
   },
   acceptBtnText: {
     fontSize: 16, fontFamily: 'Inter_600SemiBold', color: Colors.secondary,
@@ -1158,6 +1356,19 @@ const styles = StyleSheet.create({
     width: 24, height: 24, borderRadius: 12, backgroundColor: Colors.warning, justifyContent: 'center', alignItems: 'center',
     borderWidth: 2, borderColor: Colors.textWhite,
   },
+  scheduledRequestBanner: {
+    position: 'absolute', left: 14, right: 14, zIndex: 12,
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: Colors.surface, borderRadius: 14, padding: 12,
+    borderWidth: 1, borderColor: Colors.primary,
+    shadowColor: '#000', shadowOpacity: 0.14, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 5,
+  },
+  scheduledRequestIcon: {
+    width: 34, height: 34, borderRadius: 17, backgroundColor: Colors.primary,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  scheduledRequestTitle: { color: Colors.text, fontFamily: 'Inter_700Bold', fontSize: 13 },
+  scheduledRequestText: { color: Colors.textLight, fontSize: 11, marginTop: 2 },
   btnPressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   btnDisabled: { opacity: 0.6 },
 });

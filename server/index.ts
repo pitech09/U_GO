@@ -4,6 +4,8 @@ import type { Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { storage } from "./storage";
 import { startDispatchScheduler } from "./dispatch";
+import { attachRealtime } from "./realtime";
+import { requireAccessToken, requireAdmin } from "./auth";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -50,7 +52,7 @@ function setupCors(app: express.Application) {
         "Access-Control-Allow-Methods",
         "GET, POST, PUT, DELETE, OPTIONS",
       );
-      res.header("Access-Control-Allow-Headers", "Content-Type");
+      res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
       res.header("Access-Control-Allow-Credentials", "true");
     }
 
@@ -262,7 +264,19 @@ function setupErrorHandler(app: express.Application) {
 
   configureExpoAndLanding(app);
 
+  app.use("/api", (req, res, next) => {
+    if (req.path === "/health" || req.path === "/auth/login" || req.path === "/auth/register" || req.path.startsWith("/payments/webhooks/")) {
+      return next();
+    }
+    return requireAccessToken(req, res, () => {
+      if (req.path.startsWith("/admin/")) return requireAdmin(req, res, next);
+      return next();
+    });
+  });
+
   const server = await registerRoutes(app);
+
+  attachRealtime(server, (userId) => storage.getUser(userId));
 
   startDispatchScheduler(storage);
 
@@ -302,4 +316,14 @@ function setupErrorHandler(app: express.Application) {
       log(`express server serving on port ${port}`);
     },
   );
+
+  const shutdown = async (signal: string) => {
+    log(`[Server] ${signal}: shutting down`);
+    server.close(async () => {
+      await storage.close();
+      process.exit(0);
+    });
+  };
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
 })();

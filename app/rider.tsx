@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View, Text, Pressable, StyleSheet, Platform, TextInput,
+  View, Text, Pressable, StyleSheet, Platform, TextInput, Image,
   ActivityIndicator, Dimensions, ScrollView, Linking, Keyboard,
 } from 'react-native';
 import { router } from 'expo-router';
@@ -13,10 +13,11 @@ import MapView, {
 import AppModal, { useAppModal } from '@/components/AppModal';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
+import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '@/lib/auth-context';
-import { apiRequest, getApiUrl } from '@/lib/query-client';
+import { apiRequest, authenticatedFetch, getApiUrl } from '@/lib/query-client';
 import Colors from '@/constants/colors';
 import Animated, { FadeInDown, FadeInUp, SlideInDown, FadeIn } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
@@ -54,6 +55,7 @@ export default function RiderScreen() {
   const [nearbyDrivers, setNearbyDrivers] = useState<NearbyDriver[]>([]);
   const [fareEstimate, setFareEstimate] = useState<any>(null);
   const [activeRide, setActiveRide] = useState<Ride | null>(null);
+  const [scheduledRides, setScheduledRides] = useState<Ride[]>([]);
   const [driverInfo, setDriverInfo] = useState<any>(null);
   const [driverEtaMinutes, setDriverEtaMinutes] = useState<number | null>(null);
   const [routeCoordinates, setRouteCoordinates] = useState<Array<{ latitude: number; longitude: number }>>([]);
@@ -68,6 +70,17 @@ export default function RiderScreen() {
   const [reviewSubmitted, setReviewSubmitted] = useState(false);
   const [rideType, setRideType] = useState<'private' | 'shared'>('private');
   const [additionalPassengers, setAdditionalPassengers] = useState(0);
+  const [serviceType, setServiceType] = useState<'ride' | 'parcel'>('ride');
+  const [parcelWeight, setParcelWeight] = useState('');
+  const [parcelLength, setParcelLength] = useState('');
+  const [parcelWidth, setParcelWidth] = useState('');
+  const [parcelHeight, setParcelHeight] = useState('');
+  const [parcelDescription, setParcelDescription] = useState('');
+  const [parcelPhoto, setParcelPhoto] = useState<string | null>(null);
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduledDate, setScheduledDate] = useState(() => new Date(Date.now() + 60 * 60 * 1000));
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'mpesa' | 'ecocash'>('cash');
   const [paymentReference, setPaymentReference] = useState('');
   const [paymentProofImage, setPaymentProofImage] = useState<string | null>(null);
@@ -77,6 +90,7 @@ export default function RiderScreen() {
   const activeRideRef = useRef<Ride | null>(activeRide);
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const eventsInitializedRef = useRef(false);
+  const activeRideRequestRef = useRef(false);
   const locationRef = useRef(location);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   useEffect(() => { activeRideRef.current = activeRide; }, [activeRide]);
@@ -108,15 +122,27 @@ export default function RiderScreen() {
   useEffect(() => {
     if (!user?.id) return;
     checkActiveRide();
+    fetchScheduledRides();
     pollUserEvents();
 
     const interval = setInterval(() => {
       checkActiveRide();
+      fetchScheduledRides();
       pollUserEvents();
     }, 5000);
 
     return () => clearInterval(interval);
   }, [user?.id]);
+
+  const fetchScheduledRides = async () => {
+    if (!user?.id) return;
+    try {
+      const res = await apiRequest('GET', `/api/rides/rider/${user.id}`);
+      if (!res.ok) return;
+      const rides = await res.json() as Ride[];
+      setScheduledRides(rides.filter(ride => ride.scheduledAt && !['completed', 'cancelled', 'no_drivers_available'].includes(ride.status)));
+    } catch {}
+  };
 
   useEffect(() => {
     if (location) {
@@ -180,7 +206,7 @@ export default function RiderScreen() {
       const baseUrl = getApiUrl();
       const excludeParam = (user?.id && user?.role !== 'admin') ? `&exclude=${user.id}` : '';
       const url = new URL(`/api/drivers/nearby?lat=${loc.lat}&lng=${loc.lng}&radius=15${excludeParam}`, baseUrl);
-      const res = await fetch(url.toString(), { cache: 'no-store' });
+      const res = await authenticatedFetch(url.toString(), { cache: 'no-store' });
       const data = await res.json();
       setNearbyDrivers(data);
     } catch {}
@@ -188,14 +214,17 @@ export default function RiderScreen() {
 
   const checkActiveRide = async () => {
     if (!user?.id) return;
+    if (activeRideRequestRef.current) return;
+    activeRideRequestRef.current = true;
     try {
       const baseUrl = getApiUrl();
       const url = new URL(`/api/rides/rider/${user.id}/active`, baseUrl);
-      const res = await fetch(url.toString(), { cache: 'no-store' });
+      const res = await authenticatedFetch(url.toString(), { cache: 'no-store' });
+      if (!res.ok) return;
       const data = await res.json();
       if (data && data.id) {
         setActiveRide(data);
-        if (data.status === 'requested') setPhase('waiting');
+        if (data.status === 'requested' || data.status === 'scheduled') setPhase('waiting');
         else if (data.status === 'accepted' || data.status === 'arriving') {
           setPhase('matched');
           if (data.driverId) fetchDriverInfo(data.driverId);
@@ -218,6 +247,14 @@ export default function RiderScreen() {
       } else {
         const currentPhase = phaseRef.current;
         const currentRide = activeRideRef.current;
+        if (currentRide?.status === 'cancelled' && currentRide.cancellationPaymentRequired) {
+          // Cancellation charges are paid after the ride leaves the active
+          // endpoint; do not let polling replace this payment screen with a
+          // completed-ride review screen.
+          setActiveRide(currentRide);
+          setPhase('matched');
+          return;
+        }
         if (currentPhase === 'waiting' || currentPhase === 'matched' || currentPhase === 'riding') {
           if (currentRide) {
             setActiveRide(currentRide);
@@ -227,7 +264,12 @@ export default function RiderScreen() {
           }
         }
       }
-    } catch {}
+    } catch {
+      // A temporary network failure is not evidence that the ride completed
+      // or was cancelled. Leave the last backend-confirmed state visible.
+    } finally {
+      activeRideRequestRef.current = false;
+    }
   };
 
   const pollUserEvents = async () => {
@@ -236,7 +278,7 @@ export default function RiderScreen() {
     try {
       const baseUrl = getApiUrl();
       const url = new URL(`/api/events/${user.id}`, baseUrl);
-      const res = await fetch(url.toString(), { cache: 'no-store' });
+      const res = await authenticatedFetch(url.toString(), { cache: 'no-store' });
       if (!res.ok) return;
 
       const events = await res.json();
@@ -444,15 +486,30 @@ export default function RiderScreen() {
   };
 
   const handleConfirmDropoff = async () => {
-    if (!dropoffCoord || !location) return;
+    if (!dropoffCoord) {
+      showAlert('Destination required', 'Search for a destination or tap the map first.');
+      return;
+    }
+    if (!location) {
+      showAlert('Location unavailable', 'We cannot calculate the fare until your pickup location is available. Please enable location access and try again.');
+      requestLocation();
+      return;
+    }
     setLoading(true);
     try {
       const baseUrl = getApiUrl();
+      if (serviceType === 'parcel' && (!parcelPhoto || !parcelWeight || !parcelLength || !parcelWidth || !parcelHeight)) {
+        showAlert('Parcel details required', 'Add a parcel photo, weight, and all three size estimates first.');
+        return;
+      }
+      const parcelParams = serviceType === 'parcel'
+        ? `&serviceType=parcel&parcelWeightKg=${parcelWeight}&parcelLengthCm=${parcelLength}&parcelWidthCm=${parcelWidth}&parcelHeightCm=${parcelHeight}`
+        : '';
       const url = new URL(
-        `/api/fare/estimate?pLat=${location.lat}&pLng=${location.lng}&dLat=${dropoffCoord.lat}&dLng=${dropoffCoord.lng}&rideType=${rideType}&additionalPassengers=${additionalPassengers}`,
+        `/api/fare/estimate?pLat=${location.lat}&pLng=${location.lng}&dLat=${dropoffCoord.lat}&dLng=${dropoffCoord.lng}&rideType=${rideType}&additionalPassengers=${additionalPassengers}${parcelParams}`,
         baseUrl
       );
-      const res = await fetch(url.toString());
+      const res = await authenticatedFetch(url.toString());
       if (!res.ok) {
         const body = await res.json().catch(() => ({ message: res.statusText }));
         setFareEstimate(null);
@@ -465,7 +522,8 @@ export default function RiderScreen() {
       setPhase('confirming');
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     } catch (e: any) {
-      showAlert('Error', 'Could not get fare estimate');
+      console.error('U-GO fare estimate failed:', e);
+      showAlert('Fare Error', e?.message || 'Could not get fare estimate. Check your connection and try again.');
     } finally {
       setLoading(false);
     }
@@ -473,6 +531,14 @@ export default function RiderScreen() {
 
   const handleRequestRide = async () => {
     if (!location || !dropoffCoord || !user?.id) return;
+    let scheduledAt: string | undefined;
+    if (scheduleEnabled) {
+      if (Number.isNaN(scheduledDate.getTime()) || scheduledDate.getTime() < Date.now() + 5 * 60 * 1000) {
+        showAlert('Invalid schedule', 'Choose a valid pickup time at least 5 minutes from now.');
+        return;
+      }
+      scheduledAt = scheduledDate.toISOString();
+    }
     setLoading(true);
     try {
       const res = await apiRequest('POST', '/api/rides', {
@@ -480,11 +546,25 @@ export default function RiderScreen() {
         pickup: { lat: location.lat, lng: location.lng, address: pickupAddress },
         dropoff: { lat: dropoffCoord.lat, lng: dropoffCoord.lng, address: dropoffAddress },
         rideType,
+        serviceType,
         additionalPassengers,
+        passengerCount: 1 + additionalPassengers,
+        scheduledAt,
+        parcel: serviceType === 'parcel' ? {
+          weightKg: Number(parcelWeight), lengthCm: Number(parcelLength), widthCm: Number(parcelWidth), heightCm: Number(parcelHeight),
+          photo: parcelPhoto, description: parcelDescription.trim() || undefined,
+        } : undefined,
       });
       const ride = await res.json();
-      setActiveRide(ride);
-      setPhase('waiting');
+      if (ride.scheduledAt) {
+        setActiveRide(null);
+        setPhase('idle');
+        await fetchScheduledRides();
+        showAlert('Ride scheduled', `Your pickup is scheduled for ${new Date(ride.scheduledAt).toLocaleString()}. You can request another ride now.`);
+      } else {
+        setActiveRide(ride);
+        setPhase('waiting');
+      }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (e: any) {
       showAlert('Error', e.message || 'Could not request ride');
@@ -551,14 +631,42 @@ export default function RiderScreen() {
   const doCancelRide = async () => {
     if (!activeRide?.id) return;
     try {
-      await apiRequest('PUT', `/api/rides/${activeRide.id}/status`, { status: 'cancelled' });
-      setActiveRide(null);
-      setPhase('idle');
-      setDropoffCoord(null);
-      setDropoffAddress('');
-      setFareEstimate(null);
+      const response = await apiRequest('PUT', `/api/rides/${activeRide.id}/status`, { status: 'cancelled', riderId: user?.id });
+      const updated: Ride = await response.json();
+      if (updated.cancellationPaymentRequired) {
+        setActiveRide(updated);
+        setPhase('matched');
+        showAlert('Payment required', 'This ride had already been accepted by a driver. Please complete the cancellation payment below.');
+      } else {
+        setActiveRide(null);
+        setPhase('idle');
+        await fetchScheduledRides();
+        setDropoffCoord(null);
+        setDropoffAddress('');
+        setFareEstimate(null);
+      }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    } catch {}
+    } catch (e: any) {
+      showAlert('Unable to cancel ride', e.message || 'Please try again.');
+    }
+  };
+
+  const cancelScheduledRide = async (ride: Ride) => {
+    try {
+      const response = await apiRequest('PUT', `/api/rides/${ride.id}/status`, { status: 'cancelled', riderId: user?.id });
+      const updated: Ride = await response.json();
+      if (updated.cancellationPaymentRequired) {
+        setActiveRide(updated);
+        setPhase('matched');
+        if (updated.driverId) fetchDriverInfo(updated.driverId);
+        showAlert('Payment required', 'This scheduled ride had already been accepted by a driver. Please complete the cancellation payment below.');
+      } else {
+        await fetchScheduledRides();
+        showAlert('Ride cancelled', 'Your scheduled ride was cancelled.');
+      }
+    } catch (e: any) {
+      showAlert('Unable to cancel ride', e.message || 'Please try again.');
+    }
   };
 
   const handleCancelRide = () => {
@@ -584,7 +692,7 @@ export default function RiderScreen() {
     try {
       const baseUrl = getApiUrl();
       const url = new URL(`/api/rides/${activeRide.id}/review`, baseUrl);
-      const response = await fetch(url.toString(), {
+      const response = await authenticatedFetch(url.toString(), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating: reviewRating, comment: reviewComment.trim() || undefined }),
@@ -817,6 +925,22 @@ export default function RiderScreen() {
             <View style={styles.pickupDot} />
             <Text style={styles.pickupText} numberOfLines={1}>{pickupAddress}</Text>
           </View>
+          {scheduledRides.length > 0 && <View style={styles.scheduledSection}>
+            <View style={styles.scheduledHeader}><Ionicons name="calendar" size={17} color={Colors.primary} /><Text style={styles.scheduledTitle}>Your scheduled rides</Text></View>
+            {scheduledRides.slice(0, 3).map(ride => <View key={ride.id} style={styles.scheduledCard}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.scheduledTime}>{new Date(ride.scheduledAt!).toLocaleString()}</Text>
+                <Text style={styles.scheduledRoute} numberOfLines={1}>{ride.pickup.address} → {ride.dropoff.address}</Text>
+                <Text style={styles.scheduledMeta}>{ride.driverId ? 'Driver accepted' : 'Waiting for driver acceptance'}</Text>
+              </View>
+              <View style={{ alignItems: 'flex-end', gap: 5 }}>
+                <Text style={styles.scheduledFare}>M{ride.fare?.totalFare.toFixed(2) ?? '0.00'}</Text>
+                <Pressable style={styles.scheduledCancelButton} onPress={() => cancelScheduledRide(ride)}>
+                  <Text style={styles.scheduledCancelText}>Cancel</Text>
+                </Pressable>
+              </View>
+            </View>)}
+          </View>}
         </Animated.View>
       )}
 
@@ -921,21 +1045,49 @@ export default function RiderScreen() {
                 </Pressable>
                 <Pressable
                   style={[styles.rideTypeBtn, rideType === 'shared' && styles.rideTypeBtnActive]}
-                  onPress={() => setRideType('shared')}
+                  onPress={() => { setRideType('shared'); setServiceType('ride'); }}
                 >
                   <Ionicons name="people" size={18} color={rideType === 'shared' ? Colors.secondary : Colors.textLight} />
                   <Text style={[styles.rideTypeLabel, rideType === 'shared' && styles.rideTypeLabelActive]}>Shared</Text>
                 </Pressable>
               </View>
 
-              {rideType === 'private' && additionalPassengers > 0 && (
+              <View style={styles.rideTypeRow}>
+                <Pressable style={[styles.rideTypeBtn, serviceType === 'ride' && styles.rideTypeBtnActive]} onPress={() => setServiceType('ride')}>
+                  <Ionicons name="car-outline" size={18} color={serviceType === 'ride' ? Colors.secondary : Colors.textLight} />
+                  <Text style={[styles.rideTypeLabel, serviceType === 'ride' && styles.rideTypeLabelActive]}>Ride</Text>
+                </Pressable>
+                <Pressable style={[styles.rideTypeBtn, serviceType === 'parcel' && styles.rideTypeBtnActive]} onPress={() => { setServiceType('parcel'); setRideType('shared'); setAdditionalPassengers(0); }}>
+                  <Ionicons name="cube-outline" size={18} color={serviceType === 'parcel' ? Colors.secondary : Colors.textLight} />
+                  <Text style={[styles.rideTypeLabel, serviceType === 'parcel' && styles.rideTypeLabelActive]}>Parcel delivery</Text>
+                </Pressable>
+              </View>
+
+              {serviceType === 'parcel' && <View style={styles.parcelBox}>
+                <Text style={styles.parcelHelp}>Parcel price uses shared-ride pricing per seat, adjusted for weight and volume.</Text>
+                <View style={styles.parcelInputs}>
+                  {[[parcelWeight, setParcelWeight, 'Weight kg'], [parcelLength, setParcelLength, 'Length cm'], [parcelWidth, setParcelWidth, 'Width cm'], [parcelHeight, setParcelHeight, 'Height cm']].map(([value, setter, label]) => (
+                    <TextInput key={label as string} style={styles.parcelInput} placeholder={label as string} placeholderTextColor={Colors.textLight} keyboardType="decimal-pad" value={value as string} onChangeText={setter as (value: string) => void} />
+                  ))}
+                </View>
+                <TextInput style={styles.parcelInputWide} placeholder="What is in the parcel? (optional)" placeholderTextColor={Colors.textLight} value={parcelDescription} onChangeText={setParcelDescription} maxLength={200} />
+                <Pressable style={styles.parcelPhotoButton} onPress={async () => {
+                  const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, quality: 0.35, base64: true });
+                  if (!result.canceled && result.assets[0]?.base64) setParcelPhoto(`data:${result.assets[0].mimeType || 'image/jpeg'};base64,${result.assets[0].base64}`);
+                }}>
+                  {parcelPhoto ? <Image source={{ uri: parcelPhoto }} style={styles.parcelThumb} /> : <Ionicons name="camera-outline" size={20} color={Colors.primary} />}
+                  <Text style={styles.parcelPhotoText}>{parcelPhoto ? 'Parcel photo attached' : 'Add parcel photo'}</Text>
+                </Pressable>
+              </View>}
+
+              {serviceType === 'ride' && additionalPassengers > 0 && (
                 <View style={styles.passengerRow}>
                   <Text style={styles.passengerLabel}>Total passengers:</Text>
                   <Text style={styles.passengerValue}>{1 + additionalPassengers}</Text>
                 </View>
               )}
 
-              {rideType === 'private' && (
+              {serviceType === 'ride' && (
                 <View style={styles.passengerControls}>
                   <Pressable
                     style={styles.passengerBtn}
@@ -978,8 +1130,58 @@ export default function RiderScreen() {
               <FareRow label="Base fare" value={`M${fareEstimate.baseFare.toFixed(2)}`} />
               <FareRow label={`Distance (${fareEstimate.distance} KM)`} value={`M${fareEstimate.distanceFare.toFixed(2)}`} />
               <FareRow label={`Time (~${fareEstimate.duration} min)`} value={`M${fareEstimate.timeFare.toFixed(2)}`} />
+              {serviceType === 'ride' && rideType === 'shared' && additionalPassengers > 0 && <FareRow label="Additional passenger fee (10% each)" value={`M${(fareEstimate.passengerFare || 0).toFixed(2)}`} />}
+              {serviceType === 'ride' && rideType === 'private' && additionalPassengers > 0 && <FareRow label="Passengers (vehicle fare)" value={`${1 + additionalPassengers}`} />}
+              {serviceType === 'parcel' && <FareRow label={`Parcel size/weight (${fareEstimate.parcelMultiplier || 1} seat units)`} value={`M${(fareEstimate.parcelFare || 0).toFixed(2)}`} />}
             </View>
           </View>
+
+          <Pressable style={styles.scheduleToggle} onPress={() => setScheduleEnabled(value => !value)}>
+            <Ionicons name={scheduleEnabled ? 'calendar' : 'calendar-outline'} size={19} color={Colors.primary} />
+            <Text style={styles.scheduleToggleText}>{scheduleEnabled ? 'Scheduled pickup selected' : 'Schedule this booking'}</Text>
+            <Ionicons name={scheduleEnabled ? 'checkmark-circle' : 'chevron-forward'} size={19} color={scheduleEnabled ? Colors.success : Colors.textLight} />
+          </Pressable>
+          {scheduleEnabled && <View style={styles.schedulePickerBox}>
+            <View style={styles.scheduleButtons}>
+              <Pressable style={styles.scheduleButton} onPress={() => setShowDatePicker(value => !value)}>
+                <Ionicons name="calendar-outline" size={18} color={Colors.primary} />
+                <Text style={styles.scheduleButtonText}>{scheduledDate.toLocaleDateString()}</Text>
+              </Pressable>
+              <Pressable style={styles.scheduleButton} onPress={() => setShowTimePicker(value => !value)}>
+                <Ionicons name="time-outline" size={18} color={Colors.primary} />
+                <Text style={styles.scheduleButtonText}>{scheduledDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+              </Pressable>
+            </View>
+            {Platform.OS === 'web' ? <WebScheduleInputs value={scheduledDate} onChange={setScheduledDate} /> : <>
+            {showDatePicker && <DateTimePicker
+              value={scheduledDate}
+              mode="date"
+              minimumDate={new Date()}
+              display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+              onChange={(event: DateTimePickerEvent, value?: Date) => {
+                setShowDatePicker(Platform.OS === 'ios');
+                if (event.type === 'set' && value) {
+                  const next = new Date(scheduledDate);
+                  next.setFullYear(value.getFullYear(), value.getMonth(), value.getDate());
+                  setScheduledDate(next);
+                }
+              }}
+            />}
+            {showTimePicker && <DateTimePicker
+              value={scheduledDate}
+              mode="time"
+              display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+              onChange={(event: DateTimePickerEvent, value?: Date) => {
+                setShowTimePicker(Platform.OS === 'ios');
+                if (event.type === 'set' && value) {
+                  const next = new Date(scheduledDate);
+                  next.setHours(value.getHours(), value.getMinutes(), 0, 0);
+                  setScheduledDate(next);
+                }
+              }}
+            />}
+            </>}
+          </View>}
 
           <View style={styles.btnRow}>
             <Pressable
@@ -1011,18 +1213,19 @@ export default function RiderScreen() {
           <View style={styles.cardHandle} />
           <View style={styles.waitingContent}>
             <ActivityIndicator size="large" color={Colors.primary} />
-            <Text style={styles.waitingTitle}>Finding drivers for your ride</Text>
+            <Text style={styles.waitingTitle}>{activeRide?.scheduledAt ? 'Ride scheduled' : 'Finding drivers for your ride'}</Text>
             <Text style={styles.waitingSubtitle}>
-              Drivers nearby are assessing your route. You&apos;ll be notified when a driver accepts.
+              {activeRide?.scheduledAt ? `Pickup time: ${new Date(activeRide.scheduledAt).toLocaleString()}. Drivers can accept this booking in advance.` : 'Drivers nearby are assessing your route. You&apos;ll be notified when a driver accepts.'}
             </Text>
+            {activeRide && <BookingDetails ride={activeRide} />}
           </View>
 
-          <Pressable
+          {!activeRide?.cancellationPaymentRequired && <Pressable
             style={({ pressed }) => [styles.cancelRideBtn, pressed && styles.btnPressed]}
             onPress={handleCancelRide}
           >
             <Text style={styles.cancelRideBtnText}>Cancel Ride</Text>
-          </Pressable>
+          </Pressable>}
         </Animated.View>
       )}
 
@@ -1033,6 +1236,7 @@ export default function RiderScreen() {
           <View style={styles.rideStatusBar}>
             <View style={[styles.rideStatusDot, { backgroundColor: phase === 'riding' ? Colors.primary : Colors.warning }]} />
             <Text style={styles.rideStatusText}>
+              {activeRide.status === 'cancelled' && 'Cancellation payment required'}
               {activeRide.status === 'accepted' && 'Driver on the way'}
               {activeRide.status === 'arriving' && 'Driver is arriving'}
               {activeRide.status === 'arrived' && 'Driver has arrived'}
@@ -1053,6 +1257,8 @@ export default function RiderScreen() {
                   : 'Updating...'}
             </Text>
           </View>
+
+          <BookingDetails ride={activeRide} />
 
           {driverInfo && (
             <View style={styles.driverCard}>
@@ -1077,10 +1283,10 @@ export default function RiderScreen() {
             </View>
           )}
 
-          {activeRide.status === 'in_progress' && !activeRide.payment && (
+          {(activeRide.status === 'in_progress' || activeRide.cancellationPaymentRequired) && !activeRide.payment && (
             <View style={styles.ridePaymentCard}>
               <View style={styles.ridePaymentHeader}>
-                <Text style={styles.ridePaymentTitle}>Pay for this ride</Text>
+                <Text style={styles.ridePaymentTitle}>{activeRide.cancellationPaymentRequired ? 'Pay cancellation charge' : 'Pay for this ride'}</Text>
                 <Text style={styles.ridePaymentAmount}>M{activeRide.fare?.totalFare.toFixed(2) ?? '0.00'}</Text>
               </View>
               <View style={styles.paymentMethodRow}>
@@ -1100,7 +1306,7 @@ export default function RiderScreen() {
                 ))}
               </View>
               {paymentMethod === 'cash' ? (
-                <Text style={styles.paymentHint}>Pay the driver directly before ending the ride.</Text>
+                <Text style={styles.paymentHint}>{activeRide.cancellationPaymentRequired ? 'Pay the cancellation charge in cash to the driver or choose a mobile-money method.' : 'Pay the driver directly before ending the ride.'}</Text>
               ) : (
                 <>
                   <Text style={styles.paymentHint}>Pay the U-GO merchant account, then enter the transaction number. Never enter your wallet PIN here.</Text>
@@ -1145,12 +1351,12 @@ export default function RiderScreen() {
             </View>
           )}
 
-          <Pressable
+          {!activeRide.cancellationPaymentRequired && <Pressable
             style={({ pressed }) => [styles.cancelRideBtn, pressed && styles.btnPressed]}
             onPress={handleCancelRide}
           >
             <Text style={styles.cancelRideBtnText}>Cancel Ride</Text>
-          </Pressable>
+          </Pressable>}
         </Animated.View>
       )}
 
@@ -1262,6 +1468,44 @@ function FareRow({ label, value, highlight }: { label: string; value: string; hi
   );
 }
 
+function BookingDetails({ ride }: { ride: Ride }) {
+  return (
+    <View style={styles.bookingDetails}>
+      <Text style={styles.bookingType}>{ride.serviceType === 'parcel' ? 'Parcel delivery' : `${ride.rideType === 'shared' ? 'Shared' : 'Private'} ride`}</Text>
+      {ride.scheduledAt && <Text style={styles.bookingDetailText}>Pickup: {new Date(ride.scheduledAt).toLocaleString()}</Text>}
+      {ride.serviceType === 'parcel' && ride.parcel && <>
+        <Text style={styles.bookingDetailText}>Weight: {ride.parcel.weightKg} kg · Size: {ride.parcel.lengthCm} × {ride.parcel.widthCm} × {ride.parcel.heightCm} cm</Text>
+        {ride.parcel.photo && <Image source={{ uri: ride.parcel.photo }} style={styles.bookingParcelPhoto} />}
+      </>}
+      {ride.serviceType !== 'parcel' && <Text style={styles.bookingDetailText}>Passengers: {ride.passengerCount || 1}</Text>}
+    </View>
+  );
+}
+
+function WebScheduleInputs({ value, onChange }: { value: Date; onChange: (value: Date) => void }) {
+  const dateValue = `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+  const timeValue = `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`;
+  const updateDate = (nextValue: string) => {
+    const [year, month, day] = nextValue.split('-').map(Number);
+    if (!year || !month || !day) return;
+    const next = new Date(value);
+    next.setFullYear(year, month - 1, day);
+    onChange(next);
+  };
+  const updateTime = (nextValue: string) => {
+    const [hours, minutes] = nextValue.split(':').map(Number);
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return;
+    const next = new Date(value);
+    next.setHours(hours, minutes, 0, 0);
+    onChange(next);
+  };
+  const inputStyle = { flex: 1, minWidth: 0, border: `1px solid ${Colors.border}`, borderRadius: 9, padding: 10, color: Colors.text, backgroundColor: Colors.surface, fontSize: 13 };
+  return <View style={styles.scheduleButtons}>
+    {React.createElement('input', { type: 'date', value: dateValue, min: new Date().toISOString().slice(0, 10), onChange: (event: any) => updateDate(event.target.value), style: inputStyle })}
+    {React.createElement('input', { type: 'time', value: timeValue, onChange: (event: any) => updateTime(event.target.value), style: inputStyle })}
+  </View>;
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   loadingContainer: {
@@ -1357,6 +1601,16 @@ const styles = StyleSheet.create({
   pickupText: {
     fontSize: 14, fontFamily: 'Inter_500Medium', color: Colors.text, flex: 1,
   },
+  scheduledSection: { marginTop: 14, gap: 7 },
+  scheduledHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  scheduledTitle: { color: Colors.text, fontFamily: 'Inter_600SemiBold', fontSize: 13 },
+  scheduledCard: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.background, borderRadius: 10, padding: 9 },
+  scheduledTime: { color: Colors.primary, fontFamily: 'Inter_600SemiBold', fontSize: 12 },
+  scheduledRoute: { color: Colors.text, fontSize: 11, marginTop: 2 },
+  scheduledMeta: { color: Colors.textLight, fontSize: 10, marginTop: 2 },
+  scheduledFare: { color: Colors.text, fontFamily: 'Inter_700Bold', fontSize: 13 },
+  scheduledCancelButton: { borderWidth: 1, borderColor: Colors.error, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 },
+  scheduledCancelText: { color: Colors.error, fontSize: 10, fontFamily: 'Inter_600SemiBold' },
   routeInfo: { gap: 4, marginBottom: 16 },
   routePoint: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   routeDivider: {
@@ -1405,6 +1659,14 @@ const styles = StyleSheet.create({
   rideTypeLabelActive: {
     color: Colors.secondary,
   },
+  parcelBox: { backgroundColor: Colors.background, borderRadius: 14, padding: 12, marginTop: 10, gap: 9 },
+  parcelHelp: { color: Colors.textLight, fontSize: 12, lineHeight: 17 },
+  parcelInputs: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+  parcelInput: { flexGrow: 1, flexBasis: '46%', backgroundColor: Colors.surface, borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: Colors.text, fontSize: 12 },
+  parcelInputWide: { backgroundColor: Colors.surface, borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: Colors.text, fontSize: 12 },
+  parcelPhotoButton: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: Colors.primary, borderRadius: 9, padding: 9 },
+  parcelPhotoText: { color: Colors.primary, fontSize: 12, fontFamily: 'Inter_600SemiBold' },
+  parcelThumb: { width: 34, height: 34, borderRadius: 6 },
   passengerRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8,
   },
@@ -1426,6 +1688,12 @@ const styles = StyleSheet.create({
   fareCard: {
     backgroundColor: Colors.background, borderRadius: 16, padding: 16, marginBottom: 16,
   },
+  scheduleToggle: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.background, borderRadius: 11, paddingHorizontal: 12, paddingVertical: 12, marginBottom: 10 },
+  scheduleToggleText: { flex: 1, color: Colors.text, fontSize: 13, fontFamily: 'Inter_600SemiBold' },
+  schedulePickerBox: { backgroundColor: Colors.background, borderRadius: 11, padding: 10, marginBottom: 12 },
+  scheduleButtons: { flexDirection: 'row', gap: 8 },
+  scheduleButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: Colors.surface, borderRadius: 9, paddingVertical: 10 },
+  scheduleButtonText: { color: Colors.text, fontSize: 12, fontFamily: 'Inter_600SemiBold' },
   fareMain: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12,
   },
@@ -1493,6 +1761,10 @@ const styles = StyleSheet.create({
   waitingSubtitle: {
     fontSize: 14, fontFamily: 'Inter_400Regular', color: Colors.textLight,
   },
+  bookingDetails: { width: '100%', backgroundColor: Colors.background, borderRadius: 11, padding: 10, marginTop: 12 },
+  bookingType: { color: Colors.text, fontFamily: 'Inter_600SemiBold', fontSize: 13, marginBottom: 4 },
+  bookingDetailText: { color: Colors.textLight, fontSize: 12, lineHeight: 18 },
+  bookingParcelPhoto: { width: 72, height: 54, borderRadius: 7, marginTop: 7 },
   cancelRideBtn: {
     backgroundColor: 'rgba(255, 59, 48, 0.1)', paddingVertical: 14, borderRadius: 14, alignItems: 'center', marginTop: 8,
   },

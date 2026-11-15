@@ -2,7 +2,8 @@ import { calculateDistance } from "../shared/distance";
 import { randomUUID } from "crypto";
 import { calculateFareBreakdown } from "../shared/fare";
 import Redis from "ioredis";
-import type { User, Ride, WebhookEvent, UserRole, PlatformConfig, RideType } from "@shared/schema";
+import type { User, Ride, WebhookEvent, UserRole, PlatformConfig, RideType, ParcelDetails } from "@shared/schema";
+import { hashPassword } from "./auth";
 
 export interface RideDispatchState {
   rideId: string;
@@ -38,6 +39,7 @@ export interface IStorage {
   expireRideOffersForRide(rideId: string): Promise<number>;
   getPendingRideOfferExpiry(rideId: string, now: number): Promise<number>;
   finishRideDispatchNoDrivers(rideId: string): Promise<boolean>;
+  activateScheduledRide(rideId: string, now?: number): Promise<'requested' | 'accepted' | 'not_available'>;
   startRideDispatch(rideId: string): Promise<boolean>;
   getDueRideDispatches(now: number, limit?: number): Promise<RideDispatchState[]>;
   getRideDispatch(rideId: string): Promise<RideDispatchState | undefined>;
@@ -71,13 +73,14 @@ export interface IStorage {
       | 'capacity_exceeded';
     ride?: Ride;
   }>;
+  releaseScheduledRide(driverId: string, rideId: string): Promise<{ status: 'released' | 'not_available' | 'not_owner'; ride?: Ride }>;
 
   createEvent(event: Omit<WebhookEvent, 'id' | 'createdAt'>): Promise<WebhookEvent>;
   getEventsByUser(userId: string): Promise<WebhookEvent[]>;
   markEventRead(eventId: string): Promise<void>;
 
   getConfig(): Promise<PlatformConfig>;
-  calculateFareForDistance(distanceKm: number, additionalPassengers?: number, rideType?: RideType): Promise<{
+  calculateFareForDistance(distanceKm: number, additionalPassengers?: number, rideType?: RideType, parcel?: ParcelDetails): Promise<{
     baseFare: number;
     distanceFare: number;
     timeFare: number;
@@ -88,8 +91,12 @@ export interface IStorage {
     totalFare: number;
     driverEarnings: number;
     platformFee: number;
+    parcelFare?: number;
+    parcelMultiplier?: number;
   }>;
   updateConfig(updates: Partial<PlatformConfig>): Promise<PlatformConfig>;
+  healthCheck(): Promise<boolean>;
+  close(): Promise<void>;
 
   initialize(): Promise<void>;
 }
@@ -130,6 +137,9 @@ export class RedisStorage implements IStorage {
       `redis://${process.env.REDIS_HOST || '127.0.0.1'}:${process.env.REDIS_PORT || '6379'}`;
 
     this.redis = new Redis(connectionUrl, {
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 2,
+      connectTimeout: 10_000,
       retryStrategy(times) {
         if (times > 10) return null;
         return Math.min(times * 200, 2000);
@@ -152,12 +162,29 @@ export class RedisStorage implements IStorage {
     }
   }
 
+  async healthCheck(): Promise<boolean> {
+    try {
+      return (await this.redis.ping()) === 'PONG';
+    } catch {
+      return false;
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.redis.status !== 'end') await this.redis.quit();
+  }
+
   private async seed(): Promise<void> {
+    const initialAdminPassword = process.env.INITIAL_ADMIN_PASSWORD?.trim();
+    if (!initialAdminPassword) {
+      console.warn('Skipping default admin seed; set INITIAL_ADMIN_PASSWORD to create the first admin.');
+      return;
+    }
     const adminId = randomUUID();
     const admin: User = {
       id: adminId,
       username: 'admin',
-      password: 'admin123',
+      password: await hashPassword(initialAdminPassword),
       role: 'admin',
       fullName: 'Platform Admin',
       phone: '0000000000',
@@ -272,18 +299,20 @@ export class RedisStorage implements IStorage {
   private async calculateFare(
     distanceKm: number,
     additionalPassengers = 0,
-    rideType: RideType = "private"
+    rideType: RideType = "private",
+    parcel?: ParcelDetails
   ) {
     const config = await this.getConfigInternal();
-    return calculateFareBreakdown(distanceKm, config, additionalPassengers, rideType);
+    return calculateFareBreakdown(distanceKm, config, additionalPassengers, rideType, parcel);
   }
 
   async calculateFareForDistance(
     distanceKm: number,
     additionalPassengers = 0,
-    rideType: RideType = 'private'
+    rideType: RideType = 'private',
+    parcel?: ParcelDetails
   ) {
-    return this.calculateFare(distanceKm, additionalPassengers, rideType);
+    return this.calculateFare(distanceKm, additionalPassengers, rideType, parcel);
   }
 
   async createRide(ride: Omit<Ride, 'id' | 'createdAt'>): Promise<Ride> {
@@ -293,10 +322,11 @@ export class RedisStorage implements IStorage {
       ride.dropoff.lat, ride.dropoff.lng
     );
     const additionalPassengers = ride.additionalPassengers ?? 0;
-    const fare = await this.calculateFare(distance, additionalPassengers, ride.rideType ?? 'private');
+    const fare = await this.calculateFare(distance, additionalPassengers, ride.rideType ?? 'private', ride.parcel);
     const newRide: Ride = {
       ...ride,
       rideType: ride.rideType ?? 'private',
+      serviceType: ride.serviceType ?? 'ride',
       additionalPassengers,
       passengerCount: 1 + additionalPassengers,
       id,
@@ -392,6 +422,53 @@ export class RedisStorage implements IStorage {
     );
 
     return Number(result) === 1;
+  }
+
+  async activateScheduledRide(
+    rideId: string,
+    now = Date.now(),
+  ): Promise<'requested' | 'accepted' | 'not_available'> {
+    const dispatchState: RideDispatchState = {
+      rideId,
+      round: 0,
+      radiusKm: 0,
+      nextDispatchAt: now,
+      status: 'scheduled',
+      updatedAt: now,
+    };
+    const script = `
+      local rideData = redis.call('HGET', KEYS[1], ARGV[1])
+      if not rideData then return 'not_available' end
+
+      local ride = cjson.decode(rideData)
+      if ride.status ~= 'scheduled' then return 'not_available' end
+
+      if ride.driverId then
+        ride.status = 'accepted'
+        redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(ride))
+        return 'accepted'
+      end
+
+      ride.status = 'requested'
+      redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(ride))
+
+      if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 0 then
+        redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+        redis.call('ZADD', KEYS[3], ARGV[3], ARGV[1])
+      end
+
+      return 'requested'
+    `;
+    return String(await this.redis.eval(
+      script,
+      3,
+      'rideflow:rides',
+      'rideflow:dispatches',
+      'rideflow:dispatch_due',
+      rideId,
+      JSON.stringify(dispatchState),
+      String(now),
+    )) as 'requested' | 'accepted' | 'not_available';
   }
 
   async startRideDispatch(rideId: string): Promise<boolean> {
@@ -600,11 +677,14 @@ export class RedisStorage implements IStorage {
       local rideData = redis.call('HGET', KEYS[1], ARGV[1])
       if not rideData then return 0 end
       local ride = cjson.decode(rideData)
-      if ride.status ~= 'requested' then return 0 end
+      if ride.status ~= 'requested' and ride.status ~= 'scheduled' then return 0 end
       if redis.call('SISMEMBER', KEYS[4], ARGV[1]) == 1 then return 0 end
       if redis.call('SISMEMBER', KEYS[5], ARGV[2]) == 1 then return 0 end
+      if redis.call('SISMEMBER', KEYS[6], ARGV[2]) == 1 then return 0 end
       if redis.call('ZSCORE', KEYS[2], ARGV[1]) then return 0 end
-      if redis.call('ZCARD', KEYS[2]) >= 5 then return 0 end
+      -- Scheduled reservations must remain visible even when the driver's
+      -- immediate-request queue already contains five offers.
+      if ride.status ~= 'scheduled' and redis.call('ZCARD', KEYS[2]) >= 5 then return 0 end
 
       local offer = {
         driverId = ARGV[2],
@@ -622,12 +702,13 @@ export class RedisStorage implements IStorage {
 
     const result = await this.redis.eval(
       script,
-      5,
+      6,
       'rideflow:rides',
       `rideflow:driver_offers:${driverId}`,
       'rideflow:offers',
       `rideflow:driver_rejections:${driverId}`,
       `rideflow:ride_offered_drivers:${rideId}`,
+      `rideflow:scheduled_released_drivers:${rideId}`,
       rideId,
       driverId,
       String(now),
@@ -644,7 +725,7 @@ export class RedisStorage implements IStorage {
       if not rideData then return -1 end
 
       local ride = cjson.decode(rideData)
-      if ride.status ~= 'requested' then return -1 end
+      if ride.status ~= 'requested' and ride.status ~= 'scheduled' then return -1 end
 
       local now = tonumber(ARGV[2])
       local drivers = redis.call('SMEMBERS', KEYS[3])
@@ -665,9 +746,9 @@ export class RedisStorage implements IStorage {
             offer.expiredAt = now
             redis.call('HSET', KEYS[2], offerKey, cjson.encode(offer))
 
-            local rejectionKey = 'rideflow:driver_rejections:' .. driverId
-            redis.call('SADD', rejectionKey, ARGV[1])
-            redis.call('EXPIRE', rejectionKey, 2592000)
+            -- Timing out is not the same as rejecting. Allow a later
+            -- dispatch pass to advertise the still-pending ride again.
+            redis.call('SREM', KEYS[3], driverId)
 
             expiredCount = expiredCount + 1
           end
@@ -705,10 +786,7 @@ export class RedisStorage implements IStorage {
         if (offer.status === 'pending') {
           offer.status = 'expired';
           await this.redis.hset('rideflow:offers', offerKey, JSON.stringify(offer));
-
-          const rejectionKey = `rideflow:driver_rejections:${driverId}`;
-          await this.redis.sadd(rejectionKey, rideId);
-          await this.redis.expire(rejectionKey, 2592000);
+          await this.redis.srem(`rideflow:ride_offered_drivers:${rideId}`, driverId);
         }
       }
     }
@@ -716,7 +794,7 @@ export class RedisStorage implements IStorage {
       await this.redis.zremrangebyscore(queueKey, '-inf', now);
     }
 
-    const rideIds = await this.redis.zrange(queueKey, 0, 4);
+    const rideIds = await this.redis.zrange(queueKey, 0, -1);
     const results: Array<Ride & { offerExpiresAt: number }> = [];
 
     for (const rideId of rideIds) {
@@ -725,7 +803,7 @@ export class RedisStorage implements IStorage {
         this.getRide(rideId),
       ]);
 
-      if (!offerData || !ride || ride.status !== 'requested') {
+      if (!offerData || !ride || !['requested', 'scheduled'].includes(ride.status)) {
         await this.redis.zrem(queueKey, rideId);
         continue;
       }
@@ -870,10 +948,15 @@ export class RedisStorage implements IStorage {
       end
 
       local ride = cjson.decode(rideData)
-      if ride.status ~= 'requested' then return 'not_available' end
+      if ride.status ~= 'requested' and ride.status ~= 'scheduled' then return 'not_available' end
 
-      local passengerCount = tonumber(ride.passengerCount) or
-        (1 + (tonumber(ride.additionalPassengers) or 0))
+      local passengerCount
+      if ride.serviceType == 'parcel' then
+        passengerCount = tonumber(ride.fare and ride.fare.parcelMultiplier) or 1
+      else
+        passengerCount = tonumber(ride.passengerCount) or
+          (1 + (tonumber(ride.additionalPassengers) or 0))
+      end
 
       -- Calculate remaining capacity from all active rides already assigned
       -- to this driver.
@@ -887,14 +970,19 @@ export class RedisStorage implements IStorage {
           and existing.status ~= 'cancelled' then
           -- Private rides are exclusive: a driver with an active Private ride
           -- cannot accept any new offers.
-          if existing.rideType == 'private' then
+          if existing.rideType == 'private' and existing.status ~= 'scheduled' then
             return 'active_ride'
           end
 
           -- Shared rides can be combined: subtract their passenger count
           -- from the driver's remaining capacity.
-          local existingPassengerCount = tonumber(existing.passengerCount) or
-            (1 + (tonumber(existing.additionalPassengers) or 0))
+          local existingPassengerCount
+          if existing.serviceType == 'parcel' then
+            existingPassengerCount = tonumber(existing.fare and existing.fare.parcelMultiplier) or 1
+          else
+            existingPassengerCount = tonumber(existing.passengerCount) or
+              (1 + (tonumber(existing.additionalPassengers) or 0))
+          end
           remainingCapacity = remainingCapacity - existingPassengerCount
         end
       end
@@ -905,23 +993,26 @@ export class RedisStorage implements IStorage {
 
       ride.driverId = ARGV[3]
       ride.driverName = ARGV[5]
-      ride.status = 'accepted'
+      -- Scheduled rides stay in the scheduled queue after reservation. They
+      -- become active only when the scheduler reaches the pickup time.
+      if ride.status ~= 'scheduled' then
+        ride.status = 'accepted'
+      end
       ride.acceptedAt = ARGV[6]
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(ride))
 
-      -- Withdraw every other pending offer from the winning driver's queue.
+      -- Remove the accepted offer from the winning driver's queue. Keep
+      -- offers for other rides so they can be restored after this ride ends.
       local ownQueue = 'rideflow:driver_offers:' .. ARGV[3]
-      local ownRideIds = redis.call('ZRANGE', ownQueue, 0, -1)
-      for _, ownRideId in ipairs(ownRideIds) do
-        redis.call('ZREM', ownQueue, ownRideId)
-        local ownOfferKey = ARGV[3] .. ':' .. ownRideId
-        local ownOfferData = redis.call('HGET', KEYS[2], ownOfferKey)
-        if ownOfferData then
-          local ownOffer = cjson.decode(ownOfferData)
-          if ownOffer.status == 'pending' then
-            ownOffer.status = 'withdrawn'
-            redis.call('HSET', KEYS[2], ownOfferKey, cjson.encode(ownOffer))
-          end
+      redis.call('ZREM', ownQueue, ARGV[1])
+      local acceptedOfferKey = ARGV[3] .. ':' .. ARGV[1]
+      local acceptedOfferData = redis.call('HGET', KEYS[2], acceptedOfferKey)
+      if acceptedOfferData then
+        local acceptedOffer = cjson.decode(acceptedOfferData)
+        if acceptedOffer.status == 'pending' then
+          acceptedOffer.status = 'accepted'
+          acceptedOffer.acceptedAt = ARGV[6]
+          redis.call('HSET', KEYS[2], acceptedOfferKey, cjson.encode(acceptedOffer))
         end
       end
 
@@ -974,6 +1065,39 @@ export class RedisStorage implements IStorage {
 
     const ride = await this.getRide(rideId);
     return ride ? { status: 'accepted', ride } : { status: 'not_available' };
+  }
+
+  async releaseScheduledRide(
+    driverId: string,
+    rideId: string,
+  ): Promise<{ status: 'released' | 'not_available' | 'not_owner'; ride?: Ride }> {
+    const script = `
+      local rideData = redis.call('HGET', KEYS[1], ARGV[1])
+      if not rideData then return 'not_available' end
+      local ride = cjson.decode(rideData)
+      if ride.driverId ~= ARGV[2] then return 'not_owner' end
+      if ride.status ~= 'scheduled' and ride.status ~= 'accepted' then return 'not_available' end
+
+      ride.driverId = cjson.null
+      ride.driverName = cjson.null
+      ride.acceptedAt = cjson.null
+      ride.status = 'scheduled'
+      redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(ride))
+      redis.call('SADD', KEYS[2], ARGV[2])
+      redis.call('EXPIRE', KEYS[2], 2592000)
+      return 'released'
+    `;
+    const result = String(await this.redis.eval(
+      script,
+      2,
+      'rideflow:rides',
+      `rideflow:scheduled_released_drivers:${rideId}`,
+      rideId,
+      driverId,
+    ));
+    if (result !== 'released') return { status: result as 'not_available' | 'not_owner' };
+    const ride = await this.getRide(rideId);
+    return ride ? { status: 'released', ride } : { status: 'not_available' };
   }
 
   async createEvent(event: Omit<WebhookEvent, 'id' | 'createdAt'>): Promise<WebhookEvent> {

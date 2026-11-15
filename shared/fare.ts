@@ -1,4 +1,4 @@
-import type { PlatformConfig, RideType } from "./schema";
+import type { ParcelDetails, PlatformConfig, RideType } from "./schema";
 
 export interface FareBreakdown {
   baseFare: number;
@@ -11,6 +11,8 @@ export interface FareBreakdown {
   totalFare: number;
   driverEarnings: number;
   platformFee: number;
+  parcelFare?: number;
+  parcelMultiplier?: number;
 }
 
 function round2(value: number): number {
@@ -21,7 +23,8 @@ export function calculateFareBreakdown(
   distanceKm: number,
   config: PlatformConfig,
   additionalPassengers = 0,
-  rideType: RideType = "private"
+  rideType: RideType = "private",
+  parcel?: ParcelDetails
 ): FareBreakdown {
   const {
     baseFare, perKm, perMinute, driverSharePercent, minimumFare,
@@ -71,18 +74,33 @@ export function calculateFareBreakdown(
   const appliedDiscountPercent = sharedDiscount > 0 ? discountPercent : 0;
 
   let totalFare = discountedSubtotal;
+  const passengerMultiplier = 1 + Math.max(0, additionalPassengers) * 0.10;
+  const passengerFare = discountedSubtotal * (passengerMultiplier - 1);
+  totalFare *= passengerMultiplier;
   if (surgePricing) totalFare *= surgeMultiplierValue;
+
+  let parcelFare = 0;
+  let parcelMultiplier = 1;
+  if (parcel) {
+    const weightUnits = Math.ceil(parcel.weightKg / 5);
+    const volumeUnits = Math.ceil((parcel.lengthCm * parcel.widthCm * parcel.heightCm) / 50_000);
+    parcelMultiplier = Math.max(1, weightUnits, volumeUnits);
+    parcelFare = totalFare * (parcelMultiplier - 1);
+    totalFare *= parcelMultiplier;
+  }
 
   return {
     baseFare: round2(baseFare),
     distanceFare: round2(distanceFare),
     timeFare: round2(timeFare),
-    passengerFare: 0,
+    passengerFare: round2(passengerFare),
     sharedDiscount: round2(sharedDiscount),
     sharedRideDiscountPercent: appliedDiscountPercent,
     groupDiscountPercent: 0,
     totalFare: round2(totalFare),
     driverEarnings: round2(totalFare * driverPercent),
     platformFee: round2(totalFare * (1 - driverPercent)),
+    parcelFare: round2(parcelFare),
+    parcelMultiplier,
   };
 }

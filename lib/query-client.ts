@@ -1,4 +1,5 @@
 import { fetch } from "expo/fetch";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
 /**
@@ -54,16 +55,32 @@ export async function apiRequest(
 ): Promise<Response> {
   const baseUrl = getApiUrl();
   const url = new URL(route, baseUrl);
+  const accessToken = await AsyncStorage.getItem("rideflow_access_token");
 
   const res = await fetch(url.toString(), {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
+    headers: {
+      ...(data ? { "Content-Type": "application/json" } : {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
 
   await throwIfResNotOk(res);
   return res;
+}
+
+export async function authenticatedFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  const accessToken = await AsyncStorage.getItem("rideflow_access_token");
+  const headers = new Headers(init.headers);
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  return fetch(String(input), {
+    ...init,
+    body: init.body === null ? undefined : init.body,
+    signal: init.signal === null ? undefined : init.signal,
+    headers,
+  });
 }
 
 type UnauthorizedBehavior = "returnNull" | "throw";
@@ -77,6 +94,9 @@ export const getQueryFn: <T>(options: {
 
     const res = await fetch(url.toString(), {
       credentials: "include",
+      headers: (await AsyncStorage.getItem("rideflow_access_token"))
+        ? { Authorization: `Bearer ${await AsyncStorage.getItem("rideflow_access_token")}` }
+        : {},
     });
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {

@@ -104,6 +104,8 @@ const fakeStorage = {
 
   getOnlineDrivers: async () => [...onlineDrivers],
 
+  getConfig: async () => config,
+
   getRidesByDriver: async (driverId: string) =>
     driverRides.filter(ride => ride.driverId === driverId),
 
@@ -342,6 +344,7 @@ test("Shared booking preserves ride type and passenger count", async () => {
       riderId: rider.id,
       rideType: "shared",
       additionalPassengers: 2,
+      passengerCount: 3,
       pickup,
       dropoff,
     }),
@@ -371,6 +374,7 @@ test("Private booking remains undiscounted", async () => {
       riderId: rider.id,
       rideType: "private",
       additionalPassengers: 0,
+      passengerCount: 1,
       pickup,
       dropoff,
     }),
@@ -383,6 +387,61 @@ test("Private booking remains undiscounted", async () => {
   assert.equal(ride.rideType, "private");
   assert.equal(ride.passengerCount, 1);
   assert.equal(ride.fare?.sharedDiscount, 0);
+});
+
+test("Dummy rider can request a normal private ride and it enters dispatch", async () => {
+  const beforeDispatches = startedRideDispatches.length;
+
+  const response = await fetch(`${baseUrl}/api/rides`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      riderId: rider.id,
+      rideType: "private",
+      passengerCount: 1,
+      additionalPassengers: 0,
+      pickup,
+      dropoff,
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const ride = await response.json() as Ride;
+
+  assert.equal(ride.status, "requested");
+  assert.equal(ride.rideType, "private");
+  assert.equal(ride.passengerCount, 1);
+  assert.equal(startedRideDispatches.length, beforeDispatches + 1);
+  assert.equal(startedRideDispatches.at(-1), ride.id);
+});
+
+test("Dummy rider can request a scheduled shared ride and it stays queued", async () => {
+  const beforeDispatches = startedRideDispatches.length;
+  const scheduledAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+  const response = await fetch(`${baseUrl}/api/rides`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      riderId: rider.id,
+      rideType: "shared",
+      passengerCount: 2,
+      additionalPassengers: 1,
+      pickup,
+      dropoff,
+      scheduledAt,
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const ride = await response.json() as Ride;
+
+  assert.equal(ride.status, "scheduled");
+  assert.equal(ride.rideType, "shared");
+  assert.equal(ride.passengerCount, 2);
+  assert.equal(ride.scheduledAt, scheduledAt);
+  assert.equal(startedRideDispatches.length, beforeDispatches);
+  assert.equal(startedRideDispatches.includes(ride.id), false);
 });
 
 test("Private estimate equals the actual booking fare for every passenger count", async () => {
@@ -403,6 +462,7 @@ test("Private estimate equals the actual booking fare for every passenger count"
         riderId: rider.id,
         rideType: "private",
         additionalPassengers,
+        passengerCount: additionalPassengers + 1,
         pickup,
         dropoff,
       }),
@@ -888,6 +948,7 @@ test("Ride booking starts persistent dispatch without immediately broadcasting o
       riderId: rider.id,
       rideType: "private",
       additionalPassengers: 3,
+      passengerCount: 4,
       pickup,
       dropoff,
     }),
@@ -1068,10 +1129,15 @@ test("Driver offer endpoint excludes ineligible drivers and drivers with active 
     riderId: rider.id,
     driverId: activeDriver.id,
     status: "in_progress",
+    rideType: "private",
     pickup,
     dropoff,
     createdAt: new Date().toISOString(),
   });
+
+  offersByDriver.set(activeDriver.id, [
+    { ...makeOfferTestRide("offer-persisted-while-active", 1), offerExpiresAt: Date.now() + 45_000 },
+  ]);
 
   for (const candidate of onlineDrivers) {
     const response = await fetch(
@@ -1081,10 +1147,38 @@ test("Driver offer endpoint excludes ineligible drivers and drivers with active 
     assert.equal(response.status, 200, `${candidate.id} should return HTTP 200`);
 
     const offers = await response.json() as Ride[];
-    assert.deepEqual(offers, [], `${candidate.id} should receive no offers`);
+    if (candidate.id === activeDriver.id) {
+      assert.deepEqual(offers.map(offer => offer.id), ["offer-persisted-while-active"]);
+    } else {
+      assert.deepEqual(offers, [], `${candidate.id} should receive no offers`);
+    }
   }
 
   assert.equal(createdRideOffers.length, 0);
+  resetOfferTestState();
+});
+
+test("Driver scheduled endpoint returns an assigned scheduled ride", async () => {
+  resetOfferTestState();
+
+  const candidate = makeOfferTestDriver("scheduled-endpoint-driver", 4);
+  onlineDrivers = [candidate];
+  const scheduledRide: Ride = {
+    ...makeOfferTestRide("scheduled-endpoint-ride", 1),
+    status: "scheduled",
+    scheduledAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    driverId: candidate.id,
+  };
+  driverRides.push(scheduledRide);
+
+  const response = await fetch(
+    `${baseUrl}/api/rides/driver/${candidate.id}/scheduled`
+  );
+
+  assert.equal(response.status, 200);
+  const rides = await response.json() as Ride[];
+  assert.deepEqual(rides.map(ride => ride.id), [scheduledRide.id]);
+
   resetOfferTestState();
 });
 

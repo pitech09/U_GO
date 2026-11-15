@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { calculateDistance } from "../shared/distance";
 import type { RideDispatchState, IStorage } from "./storage";
+import type { Ride } from "@shared/schema";
+import { publishRealtimeEvent } from "./realtime";
 
 const ACTIVE_RIDE_STATUSES = new Set([
   "accepted",
@@ -11,6 +13,104 @@ const ACTIVE_RIDE_STATUSES = new Set([
 
 const DISPATCH_POLL_INTERVAL_MS = 1000;
 const DISPATCH_LOCK_TTL_MS = 30000;
+
+function scheduledCommitmentConflicts(ride: Ride, existing: Ride): boolean {
+  if (!ride.scheduledAt || !existing.scheduledAt) return false;
+  const start = new Date(ride.scheduledAt).getTime();
+  const existingStart = new Date(existing.scheduledAt).getTime();
+  const durationMs = Math.max(30, Number(ride.duration) || 30) * 60_000;
+  const existingDurationMs = Math.max(30, Number(existing.duration) || 30) * 60_000;
+  const bufferMs = 15 * 60_000;
+  return start < existingStart + existingDurationMs + bufferMs &&
+    existingStart < start + durationMs + bufferMs;
+}
+
+export async function advertiseScheduledRides(storage: IStorage): Promise<void> {
+  const [rides, drivers, config] = await Promise.all([
+    storage.getAllRides(),
+    storage.getOnlineDrivers(),
+    storage.getConfig(),
+  ]);
+
+  const queued = rides.filter(ride =>
+    ride.status === 'scheduled' && ride.scheduledAt && !ride.driverId &&
+    new Date(ride.scheduledAt).getTime() > Date.now()
+  );
+
+  for (const ride of queued) {
+    const assignedCommitments = rides.filter(existing =>
+      existing.driverId &&
+      existing.driverId !== ride.driverId &&
+      !['completed', 'cancelled', 'no_drivers_available'].includes(existing.status) &&
+      existing.scheduledAt
+    );
+    const requiredCapacity = ride.serviceType === 'parcel'
+      ? Math.max(1, Math.round(ride.fare?.parcelMultiplier ?? 1))
+      : ride.passengerCount ?? (1 + (ride.additionalPassengers ?? 0));
+
+    const eligibleDrivers = drivers.filter(driver => {
+      const capacity = driver.vehicleInfo?.seatingCapacity;
+      if (
+        driver.role !== 'driver' ||
+        driver.suspended ||
+        driver.isOnline !== true ||
+        !Number.isInteger(capacity) ||
+        capacity! < requiredCapacity ||
+        capacity! < 1 ||
+        capacity! > 8
+      ) return false;
+
+      if (assignedCommitments.some(existing => existing.driverId === driver.id && scheduledCommitmentConflicts(ride, existing))) {
+        return false;
+      }
+
+      // A future booking can be advertised without a fresh GPS update. If a
+      // location exists, keep the normal dispatch-radius protection.
+      if (!driver.currentLocation) return true;
+      return calculateDistance(
+        ride.pickup.lat,
+        ride.pickup.lng,
+        driver.currentLocation.lat,
+        driver.currentLocation.lng,
+      ) <= config.dispatchMaximumRadiusKm;
+    });
+
+    for (const driver of eligibleDrivers) {
+      const created = await storage.createRideOffer(
+        driver.id,
+        ride.id,
+        config.dispatchOfferWindowSeconds,
+      );
+      if (!created) continue;
+
+      console.info('[RideNotification]', JSON.stringify({
+        stage: 'offer_persisted',
+        rideId: ride.id,
+        rideType: ride.scheduledAt ? 'scheduled' : 'immediate',
+        driverId: driver.id,
+        offerCreatedAt: Date.now(),
+        offerExpiresAt: Date.now() + config.dispatchOfferWindowSeconds * 1000,
+      }));
+
+      const event = await storage.createEvent({
+        type: 'ride_requested',
+        rideId: ride.id,
+        userId: driver.id,
+        data: {
+          pickup: ride.pickup,
+          dropoff: ride.dropoff,
+          fare: ride.fare,
+          riderName: ride.riderName,
+          serviceType: ride.serviceType,
+          scheduledAt: ride.scheduledAt,
+          passengerCount: ride.passengerCount,
+        },
+        read: false,
+      });
+      publishRealtimeEvent(driver.id, { type: event.type, data: event.data });
+    }
+  }
+}
 
 async function dispatchRideRound(
   storage: IStorage,
@@ -104,6 +204,9 @@ async function dispatchRideRound(
 
   const passengerCount = ride.passengerCount ??
     (1 + (ride.additionalPassengers ?? 0));
+  const capacityRequired = ride.serviceType === 'parcel'
+    ? Math.max(1, Math.round(ride.fare?.parcelMultiplier ?? 1))
+    : passengerCount;
 
   const [onlineDrivers, allRides] = await Promise.all([
     storage.getOnlineDrivers(),
@@ -139,7 +242,7 @@ async function dispatchRideRound(
       !Number.isInteger(capacity) ||
       capacity! < 1 ||
       capacity! > 8 ||
-      capacity! < passengerCount
+      capacity! < capacityRequired
     ) {
       return false;
     }
@@ -172,6 +275,15 @@ async function dispatchRideRound(
 
       if (!created) return false;
 
+      console.info('[RideNotification]', JSON.stringify({
+        stage: 'offer_persisted',
+        rideId: ride.id,
+        rideType: ride.scheduledAt ? 'scheduled' : 'immediate',
+        driverId: driver.id,
+        offerCreatedAt: Date.now(),
+        offerExpiresAt: Date.now() + config.dispatchOfferWindowSeconds * 1000,
+      }));
+
       try {
         await storage.createEvent({
           type: "ride_requested",
@@ -183,8 +295,19 @@ async function dispatchRideRound(
             fare: ride.fare,
             riderName: ride.riderName,
             dispatchRadiusKm: radiusKm,
+            serviceType: ride.serviceType,
+            scheduledAt: ride.scheduledAt,
+            passengerCount: ride.passengerCount,
           },
           read: false,
+        });
+        publishRealtimeEvent(driver.id, {
+          type: "ride_requested",
+          data: {
+            rideId: ride.id,
+            serviceType: ride.serviceType,
+            scheduledAt: ride.scheduledAt,
+          },
         });
       } catch (error) {
         console.error(`[Dispatch] Notification failed for driver ${driver.id}:`, error);
@@ -253,7 +376,31 @@ export function startDispatchScheduler(storage: IStorage): () => void {
     if (running) return;
     running = true;
 
-    try {
+  try {
+      const now = Date.now();
+      let allRides = await storage.getAllRides();
+      // A failure in the scheduled-reservation path must not prevent normal
+      // requested rides from being dispatched in the same scheduler tick.
+      try {
+        await advertiseScheduledRides(storage);
+      } catch (error) {
+        console.error("[Dispatch] Scheduled ride advertisement failed:", error);
+      }
+      // Re-read after advertising. A driver may accept a scheduled offer
+      // while this tick is running; never activate a stale unassigned copy.
+      allRides = await storage.getAllRides();
+      const scheduledRides = allRides.filter(ride =>
+        ride.status === 'scheduled' && ride.scheduledAt && new Date(ride.scheduledAt).getTime() <= now
+      );
+      for (const ride of scheduledRides) {
+        await storage.activateScheduledRide(ride.id, now);
+      }
+      // Recover scheduled requests created by an older server instance or
+      // restored without a dispatch record.
+      for (const ride of allRides.filter(item => item.status === 'requested' && item.scheduledAt)) {
+        const dispatchState = await storage.getRideDispatch(ride.id);
+        if (!dispatchState) await storage.startRideDispatch(ride.id);
+      }
       await processDueRideDispatches(storage);
     } catch (error) {
       console.error("[Dispatch] Scheduler cycle failed:", error);

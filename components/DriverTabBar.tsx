@@ -4,17 +4,19 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import Colors from '@/constants/colors';
 
-type DriverTab = 'home' | 'requests' | 'active';
+type DriverTab = 'home' | 'requests' | 'scheduled' | 'active' | 'history';
 
 const tabs: Array<{
   key: DriverTab;
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
-  route: '/driver' | '/driver-offers' | '/driver-active';
+  route: '/driver' | '/driver-offers' | '/driver-scheduled' | '/driver-active' | '/driver-history';
 }> = [
   { key: 'home', label: 'Home', icon: 'map-outline', route: '/driver' },
   { key: 'requests', label: 'New Requests', icon: 'notifications-outline', route: '/driver-offers' },
+  { key: 'scheduled', label: 'Scheduled', icon: 'calendar-outline', route: '/driver-scheduled' },
   { key: 'active', label: 'Active Trips', icon: 'car-outline', route: '/driver-active' },
+  { key: 'history', label: 'History', icon: 'time-outline', route: '/driver-history' },
 ];
 
 export default function DriverTabBar({ active }: { active: DriverTab }) {

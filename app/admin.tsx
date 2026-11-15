@@ -7,10 +7,10 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '@/lib/auth-context';
-import { getApiUrl } from '@/lib/query-client';
+import { authenticatedFetch, getApiUrl } from '@/lib/query-client';
 import AppModal, { useAppModal } from '@/components/AppModal';
 import Colors from '@/constants/colors';
-import type { Ride, PlatformConfig } from '@shared/schema';
+import type { Ride, PlatformConfig, DriverKyc } from '@shared/schema';
 
 interface Stats {
   totalDrivers: number;
@@ -37,9 +37,16 @@ interface SafeUser {
   rating?: number;
   totalRides?: number;
   totalEarnings?: number;
+  vehicleInfo?: { make: string; model: string; year: string; color: string; plate: string; seatingCapacity?: number };
+  kyc?: DriverKyc;
 }
 
-type AdminTab = 'overview' | 'rides' | 'payments' | 'users' | 'settings';
+interface KycRecord extends SafeUser {
+  vehiclePhotos?: string[];
+  kyc: DriverKyc;
+}
+
+type AdminTab = 'overview' | 'rides' | 'payments' | 'users' | 'kyc' | 'settings';
 
 export default function AdminScreen() {
   const insets = useSafeAreaInsets();
@@ -49,6 +56,7 @@ export default function AdminScreen() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [rides, setRides] = useState<Ride[]>([]);
   const [users, setUsers] = useState<SafeUser[]>([]);
+  const [kycRecords, setKycRecords] = useState<KycRecord[]>([]);
   const [config, setConfig] = useState<PlatformConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -60,16 +68,18 @@ export default function AdminScreen() {
   const fetchAll = useCallback(async () => {
     try {
       const baseUrl = getApiUrl();
-      const [statsRes, ridesRes, usersRes, configRes] = await Promise.all([
-        fetch(new URL('/api/admin/stats', baseUrl).toString()),
-        fetch(new URL('/api/admin/rides', baseUrl).toString()),
-        fetch(new URL('/api/admin/users', baseUrl).toString()),
-        fetch(new URL('/api/admin/config', baseUrl).toString()),
+      const [statsRes, ridesRes, usersRes, configRes, kycRes] = await Promise.all([
+        authenticatedFetch(new URL('/api/admin/stats', baseUrl).toString()),
+        authenticatedFetch(new URL('/api/admin/rides', baseUrl).toString()),
+        authenticatedFetch(new URL('/api/admin/users', baseUrl).toString()),
+        authenticatedFetch(new URL('/api/admin/config', baseUrl).toString()),
+        authenticatedFetch(new URL('/api/admin/kyc', baseUrl).toString()),
       ]);
       setStats(await statsRes.json());
       setRides(await ridesRes.json());
       setUsers(await usersRes.json());
       setConfig(await configRes.json());
+      setKycRecords(await kycRes.json());
     } catch {} finally {
       setLoading(false);
       setRefreshing(false);
@@ -87,11 +97,25 @@ export default function AdminScreen() {
     fetchAll();
   };
 
+  const reviewKyc = async (id: string, status: 'approved' | 'rejected') => {
+    setActionLoading(`kyc-${id}`);
+    try {
+      const baseUrl = getApiUrl();
+      const res = await authenticatedFetch(new URL(`/api/admin/users/${id}/kyc`, baseUrl).toString(), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, rejectionReason: status === 'rejected' ? 'Please upload clear, valid documents.' : undefined }),
+      });
+      if (!res.ok) throw new Error((await res.json()).message || 'Could not review KYC');
+      fetchAll();
+    } catch (error: any) { showAlert('KYC review failed', error.message || 'Could not update KYC.'); }
+    finally { setActionLoading(null); }
+  };
+
   const suspendUser = async (userId: string) => {
     setActionLoading(userId);
     try {
       const baseUrl = getApiUrl();
-      const res = await fetch(new URL(`/api/admin/users/${userId}/suspend`, baseUrl).toString(), { method: 'PUT' });
+      const res = await authenticatedFetch(new URL(`/api/admin/users/${userId}/suspend`, baseUrl).toString(), { method: 'PUT' });
       if (res.ok) {
         const updated = await res.json();
         setUsers(prev => prev.map(u => u.id === userId ? { ...u, suspended: updated.suspended, isOnline: updated.isOnline } : u));
@@ -107,7 +131,7 @@ export default function AdminScreen() {
       setActionLoading(userId);
       try {
         const baseUrl = getApiUrl();
-        const res = await fetch(new URL(`/api/admin/users/${userId}`, baseUrl).toString(), { method: 'DELETE' });
+      const res = await authenticatedFetch(new URL(`/api/admin/users/${userId}`, baseUrl).toString(), { method: 'DELETE' });
         if (res.ok) {
           setUsers(prev => prev.filter(u => u.id !== userId));
           fetchAll();
@@ -124,7 +148,7 @@ export default function AdminScreen() {
     setActionLoading(rideId);
     try {
       const baseUrl = getApiUrl();
-      const res = await fetch(new URL(`/api/admin/rides/${rideId}/cancel`, baseUrl).toString(), { method: 'PUT' });
+      const res = await authenticatedFetch(new URL(`/api/admin/rides/${rideId}/cancel`, baseUrl).toString(), { method: 'PUT' });
       if (res.ok) {
         setRides(prev => prev.map(r => r.id === rideId ? { ...r, status: 'cancelled' } : r));
         fetchAll();
@@ -139,7 +163,7 @@ export default function AdminScreen() {
     setActionLoading(`payment-${rideId}`);
     try {
       const baseUrl = getApiUrl();
-      const res = await fetch(new URL(`/api/admin/rides/${rideId}/payment`, baseUrl).toString(), {
+      const res = await authenticatedFetch(new URL(`/api/admin/rides/${rideId}/payment`, baseUrl).toString(), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ adminId: user.id, status }),
@@ -157,7 +181,7 @@ export default function AdminScreen() {
   const updateConfig = async (updates: Partial<PlatformConfig>) => {
     try {
       const baseUrl = getApiUrl();
-      const res = await fetch(new URL('/api/admin/config', baseUrl).toString(), {
+      const res = await authenticatedFetch(new URL('/api/admin/config', baseUrl).toString(), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -215,14 +239,14 @@ export default function AdminScreen() {
       </View>
 
       <View style={styles.tabBar}>
-        {(['overview', 'rides', 'payments', 'users', 'settings'] as AdminTab[]).map(t => (
+        {(['overview', 'rides', 'payments', 'users', 'kyc', 'settings'] as AdminTab[]).map(t => (
           <Pressable
             key={t}
             style={[styles.tabItem, tab === t && styles.tabActive]}
             onPress={() => setTab(t)}
           >
             <Ionicons
-              name={t === 'overview' ? 'stats-chart' : t === 'rides' ? 'car' : t === 'payments' ? 'wallet' : t === 'users' ? 'people' : 'settings'}
+              name={t === 'overview' ? 'stats-chart' : t === 'rides' ? 'car' : t === 'payments' ? 'wallet' : t === 'users' ? 'people' : t === 'kyc' ? 'shield-checkmark' : 'settings'}
               size={16}
               color={tab === t ? Colors.textWhite : Colors.textLight}
             />
@@ -246,6 +270,7 @@ export default function AdminScreen() {
         {tab === 'users' && (
           <UsersTab users={users} suspendUser={suspendUser} deleteUser={deleteUser} actionLoading={actionLoading} />
         )}
+        {tab === 'kyc' && <KycTab records={kycRecords} reviewKyc={reviewKyc} actionLoading={actionLoading} />}
         {tab === 'settings' && config && (
           <SettingsTab config={config} updateConfig={updateConfig} />
         )}
@@ -477,6 +502,7 @@ function RideCard({ ride, statusColor, cancelRide, verifyPayment, actionLoading,
         </Text>
         <Text style={styles.rideMetaTime}>{new Date(ride.createdAt).toLocaleString()}</Text>
       </View>
+      <Text style={styles.rideMetaTime}>{ride.serviceType === 'parcel' ? `Parcel · ${ride.parcel?.weightKg} kg · ${ride.fare?.parcelMultiplier || 1} seat unit(s)` : `${ride.rideType === 'shared' ? 'Shared' : 'Private'} · ${ride.passengerCount || 1} passenger(s)`}{ride.scheduledAt ? ` · Scheduled ${new Date(ride.scheduledAt).toLocaleString()}` : ''}</Text>
       {ride.payment && (
         <View style={styles.paymentReviewBox}>
           <View style={styles.paymentReviewHeader}>
@@ -632,6 +658,26 @@ function UserCard({ user: u, suspendUser, deleteUser, actionLoading }: {
       </View>
     </View>
   );
+}
+
+function KycTab({ records, reviewKyc, actionLoading }: { records: KycRecord[]; reviewKyc: (id: string, status: 'approved' | 'rejected') => void; actionLoading: string | null }) {
+  if (!records.length) return <View style={styles.emptyState}><Ionicons name="shield-checkmark-outline" size={36} color={Colors.textLight} /><Text style={styles.emptyText}>No KYC submissions yet</Text></View>;
+  return <>
+    <Text style={styles.sectionTitle}>Driver verification ({records.length})</Text>
+    {records.map(record => <View key={record.id} style={styles.kycCard}>
+      <View style={styles.userHeader}><View><Text style={styles.userName}>{record.fullName}</Text><Text style={styles.userPhone}>{record.phone}</Text></View><Text style={styles.userRole}>{record.kyc.status}</Text></View>
+      {record.vehicleInfo && <Text style={styles.userMeta}>{record.vehicleInfo.year} {record.vehicleInfo.make} {record.vehicleInfo.model} · {record.vehicleInfo.plate}</Text>}
+      <View style={styles.kycImages}>
+        {(record.vehiclePhotos ?? []).map((photo, index) => <Image key={`car-${index}`} source={{ uri: photo }} style={styles.kycImage} />)}
+        {record.kyc.idDocumentImage && <Image source={{ uri: record.kyc.idDocumentImage }} style={styles.kycImage} />}
+        {record.kyc.driverLicenseImage && <Image source={{ uri: record.kyc.driverLicenseImage }} style={styles.kycImage} />}
+      </View>
+      {record.kyc.status === 'pending' && <View style={styles.paymentActions}>
+        <Pressable style={styles.paymentApproveBtn} onPress={() => reviewKyc(record.id, 'approved')} disabled={actionLoading === `kyc-${record.id}`}><Text style={styles.paymentApproveText}>Approve</Text></Pressable>
+        <Pressable style={styles.paymentRejectBtn} onPress={() => reviewKyc(record.id, 'rejected')} disabled={actionLoading === `kyc-${record.id}`}><Text style={styles.paymentRejectText}>Reject</Text></Pressable>
+      </View>}
+    </View>)}
+  </>;
 }
 
 function SettingsTab({ config, updateConfig }: { config: PlatformConfig; updateConfig: (u: Partial<PlatformConfig>) => Promise<void> }) {
@@ -1168,6 +1214,13 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 8,
   },
+  kycCard: {
+    backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 16, padding: 14, marginBottom: 10,
+  },
+  userHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  userPhone: { color: Colors.textLight, fontSize: 12, marginTop: 3 },
+  kycImages: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
+  kycImage: { width: 74, height: 58, borderRadius: 7, backgroundColor: Colors.backgroundDark },
   userCardSuspended: {
     borderWidth: 1,
     borderColor: 'rgba(255,59,48,0.25)',

@@ -37,21 +37,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
-        const stored = await AsyncStorage.getItem('rideflow_user');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (!parsed?.id) {
-            await AsyncStorage.removeItem('rideflow_user');
+        const token = await AsyncStorage.getItem('rideflow_access_token');
+        if (token) {
+          const res = await apiRequest('GET', '/api/auth/me');
+          const fresh = await res.json();
+          if (fresh?.id) {
+            setUser(fresh);
+            await AsyncStorage.setItem('rideflow_user', JSON.stringify(fresh));
           } else {
-            const res = await apiRequest('GET', `/api/user/${parsed.id}`);
-            const fresh = await res.json();
-            if (fresh?.id) {
-              setUser(fresh);
-              await AsyncStorage.setItem('rideflow_user', JSON.stringify(fresh));
-            } else {
-              await AsyncStorage.removeItem('rideflow_user');
-            }
+            await AsyncStorage.multiRemove(['rideflow_user', 'rideflow_access_token']);
           }
+        } else {
+          await AsyncStorage.removeItem('rideflow_user');
         }
       } catch {
         await AsyncStorage.removeItem('rideflow_user');
@@ -66,10 +63,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await AsyncStorage.removeItem('rideflow_user');
     setUser(null);
     const res = await apiRequest('POST', '/api/auth/login', { username, password });
-    const userData = await res.json();
-    await AsyncStorage.setItem('rideflow_user', JSON.stringify(userData));
-    setUser(userData);
-    return userData;
+    const payload = await res.json();
+    await AsyncStorage.multiSet([
+      ['rideflow_user', JSON.stringify(payload.user)],
+      ['rideflow_access_token', payload.accessToken],
+    ]);
+    setUser(payload.user);
+    return payload.user;
   };
 
   const register = async (data: {
@@ -88,17 +88,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }): Promise<SafeUser> => {
     const res = await apiRequest('POST', '/api/auth/register', data);
-    const userData = await res.json();
-    await AsyncStorage.setItem('rideflow_user', JSON.stringify(userData));
-    setUser(userData);
-    return userData;
+    const payload = await res.json();
+    await AsyncStorage.multiSet([
+      ['rideflow_user', JSON.stringify(payload.user)],
+      ['rideflow_access_token', payload.accessToken],
+    ]);
+    setUser(payload.user);
+    return payload.user;
   };
 
   const logout = async () => {
     setUser(null);
     await queryClient.cancelQueries();
     queryClient.clear();
-    await AsyncStorage.removeItem('rideflow_user');
+    await AsyncStorage.multiRemove(['rideflow_user', 'rideflow_access_token']);
   };
 
   const refreshUser = async () => {
