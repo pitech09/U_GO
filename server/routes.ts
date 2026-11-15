@@ -306,7 +306,9 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       const parsed = loginSchema.parse(req.body);
       const user = await routeStorage.getUserByUsername(parsed.username);
       if (!user || !(await verifyPassword(parsed.password, user.password))) {
-        return res.status(401).json({ message: "Invalid credentials" });
+        return res.status(401).json({
+          message: "The username or password is incorrect. Please check your details and try again.",
+        });
       }
       if (!user.password.startsWith('scrypt$')) {
         await routeStorage.updateUser(user.id, { password: await hashPassword(parsed.password) });

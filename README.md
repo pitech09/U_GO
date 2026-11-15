@@ -222,6 +222,14 @@ rideflow/
 └── LICENSE               # GPLv3
 ```
 
+## Plain-language project documentation
+
+If you are not a software engineer, start with [the Project Guide](docs/PROJECT_GUIDE.md). It explains the product, the rider/driver/admin roles, the ride lifecycle, scheduled rides, money, maps, notifications, and the important vocabulary.
+
+For day-to-day platform work, use the [Operations Guide](docs/OPERATIONS_GUIDE.md). For developers and deployment teams, use the [Engineering Map](docs/ENGINEERING_MAP.md).
+
+For a deeper explanation of the code engines, fare formulas, dispatch behavior, and race-condition protection, read the [Code Engines Guide](docs/CODE_ENGINES_GUIDE.md).
+
 ---
 
 ##  API Reference

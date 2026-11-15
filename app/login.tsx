@@ -52,7 +52,7 @@ export default function LoginScreen() {
         router.replace('/rider');
       }
     } catch (e: any) {
-      showAlert('Login Failed', e.message || 'Invalid credentials');
+      showAlert('Login Failed', e.message || 'We could not sign you in. Please check your details and try again.');
     } finally {
       setLoading(false);
     }

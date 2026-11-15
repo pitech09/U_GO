@@ -64,7 +64,7 @@ export default function RegisterScreen() {
       if (user.role === 'rider') router.replace('/rider');
       else if (user.role === 'driver') router.replace('/driver');
     } catch (e: any) {
-      showAlert('Registration Failed', e.message || 'Something went wrong');
+      showAlert('Registration Failed', e.message || 'We could not create your account. Please check your details and try again.');
     } finally {
       setLoading(false);
     }

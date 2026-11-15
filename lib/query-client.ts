@@ -43,8 +43,35 @@ export function getApiUrl(): string {
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    const text = (await res.text()) || res.statusText;
-    throw new Error(`${res.status}: ${text}`);
+    let message = '';
+
+    // The API returns errors as { message: string }. Read that field instead
+    // of showing users the raw JSON response and HTTP status code.
+    try {
+      const payload = await res.json() as { message?: unknown };
+      if (typeof payload?.message === 'string') {
+        message = payload.message.trim();
+      }
+    } catch {
+      // Some infrastructure errors may return plain text or an empty body.
+      // Fall through to a friendly status-based message below.
+    }
+
+    if (!message) {
+      message = res.status >= 500
+        ? 'The service is temporarily unavailable. Please try again.'
+        : res.status === 401
+          ? 'Your login has expired. Please sign in again.'
+          : res.status === 403
+            ? 'You do not have permission to do that.'
+            : res.status === 404
+              ? 'We could not find what you requested.'
+              : 'We could not complete that request. Please try again.';
+    }
+
+    const error = new Error(message) as Error & { status?: number };
+    error.status = res.status;
+    throw error;
   }
 }
 
