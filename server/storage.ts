@@ -2,7 +2,7 @@ import { calculateDistance } from "../shared/distance";
 import { randomUUID } from "crypto";
 import { calculateFareBreakdown } from "../shared/fare";
 import Redis from "ioredis";
-import type { User, Ride, WebhookEvent, UserRole, PlatformConfig, RideType, ParcelDetails } from "@shared/schema";
+import type { User, Ride, WebhookEvent, UserRole, PlatformConfig, RideType, ParcelDetails, DriverSettlement, DriverWalletSummary, LedgerTransaction, PaymentMethod, SettlementStatus } from "@shared/schema";
 import { hashPassword } from "./auth";
 
 export interface RideDispatchState {
@@ -89,6 +89,7 @@ export interface IStorage {
     sharedRideDiscountPercent: number;
     groupDiscountPercent: number;
     totalFare: number;
+    cashTotalFare: number;
     driverEarnings: number;
     platformFee: number;
     parcelFare?: number;
@@ -97,6 +98,13 @@ export interface IStorage {
   updateConfig(updates: Partial<PlatformConfig>): Promise<PlatformConfig>;
   healthCheck(): Promise<boolean>;
   close(): Promise<void>;
+
+  postRideFinancials(ride: Ride, actorId?: string): Promise<LedgerTransaction | undefined>;
+  getDriverWallet(driverId: string): Promise<DriverWalletSummary>;
+  getLedgerTransactions(filters?: { driverId?: string; rideId?: string }): Promise<LedgerTransaction[]>;
+  createSettlement(driverId: string, amountMinor: number): Promise<DriverSettlement>;
+  getSettlements(filters?: { driverId?: string; status?: SettlementStatus }): Promise<DriverSettlement[]>;
+  updateSettlement(id: string, updates: Partial<DriverSettlement>, actorId?: string): Promise<DriverSettlement | undefined>;
 
   initialize(): Promise<void>;
 }
@@ -350,6 +358,200 @@ export class RedisStorage implements IStorage {
     const updated = { ...ride, ...updates };
     await this.redis.hset('rideflow:rides', id, JSON.stringify(updated));
     return updated;
+  }
+
+  private static moneyToMinor(value: number): number {
+    return Math.round(value * 100);
+  }
+
+  private async saveLedgerTransaction(transaction: LedgerTransaction): Promise<void> {
+    const debits = transaction.entries
+      .filter(entry => entry.direction === 'debit')
+      .reduce((sum, entry) => sum + entry.amountMinor, 0);
+    const credits = transaction.entries
+      .filter(entry => entry.direction === 'credit')
+      .reduce((sum, entry) => sum + entry.amountMinor, 0);
+    if (debits <= 0 || debits !== credits) {
+      throw new Error('Ledger transaction is not balanced');
+    }
+    await this.redis.hset('rideflow:ledger:transactions', transaction.id, JSON.stringify(transaction));
+    for (const entry of transaction.entries) {
+      await this.redis.hset('rideflow:ledger:entries', entry.id, JSON.stringify(entry));
+    }
+  }
+
+  async postRideFinancials(ride: Ride, actorId?: string): Promise<LedgerTransaction | undefined> {
+    if (!ride.driverId || !ride.fare || !ride.payment || !['cash', 'mpesa', 'ecocash'].includes(ride.payment.method)) {
+      return undefined;
+    }
+
+    const idempotencyKey = `ride:${ride.id}:earnings`;
+    const existingId = await this.redis.hget('rideflow:ledger:idempotency', idempotencyKey);
+    if (existingId) {
+      const existing = await this.redis.hget('rideflow:ledger:transactions', existingId);
+      return existing ? JSON.parse(existing) as LedgerTransaction : undefined;
+    }
+
+    const grossMinor = RedisStorage.moneyToMinor(ride.fare.totalFare);
+    const driverMinor = RedisStorage.moneyToMinor(ride.fare.driverEarnings);
+    const commissionMinor = grossMinor - driverMinor;
+    if (grossMinor <= 0 || driverMinor < 0 || commissionMinor < 0) return undefined;
+
+    const journalId = randomUUID();
+    const now = new Date().toISOString();
+    const makeEntry = (account: LedgerTransaction['entries'][number]['account'], direction: 'debit' | 'credit', amountMinor: number, metadata?: Record<string, unknown>) => ({
+      id: randomUUID(), journalId, account, direction, amountMinor, currency: 'LSL' as const,
+      driverId: ride.driverId, riderId: ride.riderId, rideId: ride.id,
+      category: 'ride_earnings', paymentMethod: ride.payment!.method, createdAt: now,
+      metadata,
+    });
+    const entries = [
+      makeEntry(ride.payment.method === 'cash' ? 'driver_cash_collection_receivable' : 'payment_clearing', 'debit', grossMinor, {
+        grossMinor, driverEarningsMinor: driverMinor, platformCommissionMinor: commissionMinor,
+        cashCollection: ride.payment.method === 'cash',
+      }),
+      makeEntry('driver_earnings_payable', 'credit', driverMinor),
+      makeEntry('platform_commission_revenue', 'credit', commissionMinor),
+    ];
+    const transaction: LedgerTransaction = {
+      id: journalId, journalId, status: 'posted', amountMinor: grossMinor, currency: 'LSL',
+      category: 'ride_earnings', paymentMethod: ride.payment.method, driverId: ride.driverId,
+      riderId: ride.riderId, rideId: ride.id, actorId, createdAt: now, entries,
+      metadata: { grossMinor, driverEarningsMinor: driverMinor, platformCommissionMinor: commissionMinor },
+    };
+
+    const claimed = await this.redis.hsetnx('rideflow:ledger:idempotency', idempotencyKey, journalId);
+    if (claimed !== 1) {
+      const concurrentId = await this.redis.hget('rideflow:ledger:idempotency', idempotencyKey);
+      const concurrent = concurrentId ? await this.redis.hget('rideflow:ledger:transactions', concurrentId) : null;
+      return concurrent ? JSON.parse(concurrent) as LedgerTransaction : undefined;
+    }
+    try {
+      await this.saveLedgerTransaction(transaction);
+      return transaction;
+    } catch (error) {
+      await this.redis.hdel('rideflow:ledger:idempotency', idempotencyKey);
+      throw error;
+    }
+  }
+
+  async getLedgerTransactions(filters: { driverId?: string; rideId?: string } = {}): Promise<LedgerTransaction[]> {
+    const transactions = (await this.redis.hvals('rideflow:ledger:transactions'))
+      .map(value => JSON.parse(value) as LedgerTransaction)
+      .filter(transaction => !filters.driverId || transaction.driverId === filters.driverId)
+      .filter(transaction => !filters.rideId || transaction.rideId === filters.rideId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return transactions;
+  }
+
+  async getDriverWallet(driverId: string): Promise<DriverWalletSummary> {
+    const transactions = await this.getLedgerTransactions({ driverId });
+    const settlements = await this.getSettlements({ driverId });
+    let lifetime = 0;
+    let cashCollected = 0;
+    let cashCommission = 0;
+    let adjustments = 0;
+    let refunds = 0;
+    for (const transaction of transactions.filter(item => item.status === 'posted')) {
+      const earningsCredit = transaction.entries
+        .filter(entry => entry.account === 'driver_earnings_payable' && entry.direction === 'credit')
+        .reduce((sum, entry) => sum + entry.amountMinor, 0);
+      lifetime += earningsCredit;
+      if (transaction.paymentMethod === 'cash' && transaction.category === 'ride_earnings') {
+        cashCollected += earningsCredit;
+        cashCommission += Number(transaction.metadata?.platformCommissionMinor || 0);
+      }
+      if (transaction.category === 'adjustment') adjustments += transaction.amountMinor;
+      if (transaction.category === 'refund') refunds += transaction.amountMinor;
+    }
+    const completedSettlementsMinor = settlements
+      .filter(settlement => settlement.status === 'PAID')
+      .reduce((sum, settlement) => sum + settlement.amountMinor, 0);
+    const reservedEarningsMinor = settlements
+      .filter(settlement => ['APPROVED', 'PROCESSING'].includes(settlement.status))
+      .reduce((sum, settlement) => sum + settlement.amountMinor, 0);
+    const pendingEarningsMinor = Math.max(0, lifetime - completedSettlementsMinor - reservedEarningsMinor);
+    return {
+      driverId, currency: 'LSL', lifetimeEarningsMinor: lifetime,
+      availableEarningsMinor: Math.max(0, pendingEarningsMinor - cashCollected),
+      pendingEarningsMinor, reservedEarningsMinor, completedSettlementsMinor,
+      outstandingCashCommissionsMinor: cashCommission, adjustmentsMinor: adjustments, refundsMinor: refunds,
+    };
+  }
+
+  async createSettlement(driverId: string, amountMinor: number): Promise<DriverSettlement> {
+    if (!Number.isInteger(amountMinor) || amountMinor <= 0) throw new Error('Settlement amount must be a positive whole number of lisente');
+    const wallet = await this.getDriverWallet(driverId);
+    if (amountMinor > wallet.availableEarningsMinor) throw new Error('Settlement amount is greater than the driver available balance');
+    const settlement: DriverSettlement = {
+      id: randomUUID(), driverId, amountMinor, currency: 'LSL', status: 'REQUESTED', requestedAt: new Date().toISOString(),
+    };
+    await this.redis.hset('rideflow:settlements', settlement.id, JSON.stringify(settlement));
+    return settlement;
+  }
+
+  async getSettlements(filters: { driverId?: string; status?: SettlementStatus } = {}): Promise<DriverSettlement[]> {
+    return (await this.redis.hvals('rideflow:settlements'))
+      .map(value => JSON.parse(value) as DriverSettlement)
+      .filter(settlement => !filters.driverId || settlement.driverId === filters.driverId)
+      .filter(settlement => !filters.status || settlement.status === filters.status)
+      .sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime());
+  }
+
+  async updateSettlement(id: string, updates: Partial<DriverSettlement>, actorId?: string): Promise<DriverSettlement | undefined> {
+    const raw = await this.redis.hget('rideflow:settlements', id);
+    if (!raw) return undefined;
+    const settlement = JSON.parse(raw) as DriverSettlement;
+    const nextStatus = updates.status;
+    const now = new Date().toISOString();
+    if (nextStatus && nextStatus !== settlement.status) {
+      const allowed: Record<SettlementStatus, SettlementStatus[]> = {
+        REQUESTED: ['UNDER_REVIEW', 'REJECTED', 'CANCELLED'], UNDER_REVIEW: ['APPROVED', 'REJECTED', 'CANCELLED'],
+        APPROVED: ['PROCESSING', 'REJECTED', 'CANCELLED'], PROCESSING: ['PAID', 'FAILED', 'CANCELLED'],
+        PAID: [], REJECTED: [], FAILED: [], CANCELLED: [],
+      };
+      if (!allowed[settlement.status].includes(nextStatus)) throw new Error(`Settlement cannot move from ${settlement.status} to ${nextStatus}`);
+      const wallet = await this.getDriverWallet(settlement.driverId);
+      if (nextStatus === 'APPROVED' && settlement.amountMinor > wallet.availableEarningsMinor) {
+        throw new Error('The driver no longer has enough available balance for this settlement');
+      }
+      if (nextStatus === 'APPROVED') {
+        await this.postSettlementLedger(settlement, 'reserve', actorId);
+      } else if (nextStatus === 'PAID') {
+        await this.postSettlementLedger(settlement, 'pay', actorId);
+      } else if (['REJECTED', 'FAILED', 'CANCELLED'].includes(nextStatus) && ['APPROVED', 'PROCESSING'].includes(settlement.status)) {
+        await this.postSettlementLedger(settlement, 'release', actorId);
+      }
+    }
+    const updated: DriverSettlement = {
+      ...settlement, ...updates,
+      reviewedAt: ['APPROVED', 'REJECTED'].includes(nextStatus || '') ? now : settlement.reviewedAt,
+      reviewedBy: ['APPROVED', 'REJECTED'].includes(nextStatus || '') ? actorId : settlement.reviewedBy,
+      processedAt: ['PROCESSING', 'PAID', 'FAILED'].includes(nextStatus || '') ? now : settlement.processedAt,
+      paidAt: nextStatus === 'PAID' ? now : settlement.paidAt,
+      rejectedAt: nextStatus === 'REJECTED' ? now : settlement.rejectedAt,
+    };
+    await this.redis.hset('rideflow:settlements', id, JSON.stringify(updated));
+    return updated;
+  }
+
+  private async postSettlementLedger(settlement: DriverSettlement, action: 'reserve' | 'pay' | 'release', actorId?: string): Promise<void> {
+    const idempotencyKey = `settlement:${settlement.id}:${action}`;
+    if (await this.redis.hexists('rideflow:ledger:idempotency', idempotencyKey)) return;
+    const journalId = randomUUID();
+    const now = new Date().toISOString();
+    const debitAccount = action === 'pay' ? 'driver_settlement_payable' : 'driver_earnings_payable';
+    const creditAccount = action === 'release' ? 'driver_earnings_payable' : action === 'reserve' ? 'driver_settlement_payable' : 'platform_operating';
+    const transaction: LedgerTransaction = {
+      id: journalId, journalId, status: 'posted', amountMinor: settlement.amountMinor, currency: 'LSL', category: `settlement_${action}`,
+      driverId: settlement.driverId, actorId, createdAt: now,
+      entries: [
+        { id: randomUUID(), journalId, account: debitAccount, direction: 'debit', amountMinor: settlement.amountMinor, currency: 'LSL', driverId: settlement.driverId, category: `settlement_${action}`, createdAt: now, metadata: { settlementId: settlement.id } },
+        { id: randomUUID(), journalId, account: creditAccount, direction: 'credit', amountMinor: settlement.amountMinor, currency: 'LSL', driverId: settlement.driverId, category: `settlement_${action}`, createdAt: now, metadata: { settlementId: settlement.id } },
+      ],
+      metadata: { settlementId: settlement.id, action },
+    };
+    if (await this.redis.hsetnx('rideflow:ledger:idempotency', idempotencyKey, journalId) === 1) await this.saveLedgerTransaction(transaction);
   }
 
   async getRidesByRider(riderId: string): Promise<Ride[]> {

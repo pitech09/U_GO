@@ -22,7 +22,9 @@ export interface User {
   role: UserRole;
   fullName: string;
   phone: string;
+  email?: string;
   createdAt: string;
+  active?: boolean;
   isOnline?: boolean;
   suspended?: boolean;
   currentLocation?: { lat: number; lng: number };
@@ -39,6 +41,87 @@ export interface User {
   rating?: number;
   totalRides?: number;
   totalEarnings?: number;
+}
+
+export type LedgerAccount =
+  | 'payment_clearing'
+  | 'driver_earnings_payable'
+  | 'driver_cash_collection_receivable'
+  | 'platform_commission_revenue'
+  | 'platform_operating'
+  | 'driver_settlement_payable'
+  | 'refund_liability'
+  | 'adjustment';
+
+export type LedgerDirection = 'debit' | 'credit';
+export type LedgerStatus = 'posted' | 'reversed';
+
+export interface LedgerEntry {
+  id: string;
+  journalId: string;
+  account: LedgerAccount;
+  direction: LedgerDirection;
+  amountMinor: number;
+  currency: 'LSL';
+  driverId?: string;
+  riderId?: string;
+  rideId?: string;
+  category: string;
+  paymentMethod?: PaymentMethod;
+  createdAt: string;
+  reference?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface LedgerTransaction {
+  id: string;
+  journalId: string;
+  status: LedgerStatus;
+  amountMinor: number;
+  currency: 'LSL';
+  category: string;
+  paymentMethod?: PaymentMethod;
+  driverId?: string;
+  riderId?: string;
+  rideId?: string;
+  reference?: string;
+  actorId?: string;
+  createdAt: string;
+  entries: LedgerEntry[];
+  metadata?: Record<string, unknown>;
+}
+
+export type SettlementStatus = 'REQUESTED' | 'UNDER_REVIEW' | 'APPROVED' | 'PROCESSING' | 'PAID' | 'REJECTED' | 'FAILED' | 'CANCELLED';
+
+export interface DriverWalletSummary {
+  driverId: string;
+  currency: 'LSL';
+  lifetimeEarningsMinor: number;
+  availableEarningsMinor: number;
+  pendingEarningsMinor: number;
+  reservedEarningsMinor: number;
+  completedSettlementsMinor: number;
+  outstandingCashCommissionsMinor: number;
+  adjustmentsMinor: number;
+  refundsMinor: number;
+}
+
+export interface DriverSettlement {
+  id: string;
+  driverId: string;
+  amountMinor: number;
+  currency: 'LSL';
+  status: SettlementStatus;
+  requestedAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  processedAt?: string;
+  paidAt?: string;
+  rejectedAt?: string;
+  rejectionReason?: string;
+  paymentReference?: string;
+  paymentEvidence?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export type RideType = 'private' | 'shared';
@@ -60,11 +143,13 @@ export type PaymentStatus = 'pending_cash' | 'pending_verification' | 'pending_p
 export interface RidePayment {
   method: PaymentMethod;
   status: PaymentStatus;
+  // Cash is rounded to a whole loti at collection time. Digital payments
+  // continue to use the exact fare stored on the ride.
+  amount?: number;
   providerTransactionId?: string;
   providerConversationId?: string;
   thirdPartyConversationId?: string;
   phone?: string;
-  amount?: number;
   transactionReference?: string;
   proofImage?: string;
   submittedAt: string;
@@ -127,6 +212,7 @@ export interface Ride {
     sharedRideDiscountPercent?: number;
     groupDiscountPercent?: number;
     totalFare: number;
+    cashTotalFare?: number;
     driverEarnings: number;
     platformFee: number;
     parcelFare?: number;

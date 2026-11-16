@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { initiateMobileMoneyPayment, parseProviderWebhook, queryMpesaTransaction, reverseMpesaTransaction, verifyProviderWebhook, type MobileMoneyProvider } from "./payments";
 import { publishRealtimeEvent } from "./realtime";
 import { hashPassword, signAccessToken, verifyPassword } from "./auth";
+import { roundCashFare } from "../shared/fare";
 
 function getRouteParam(value: string | string[] | undefined): string {
   return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
@@ -310,6 +311,9 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
           message: "The username or password is incorrect. Please check your details and try again.",
         });
       }
+      if (user.active === false || user.suspended) {
+        return res.status(403).json({ message: "This account is currently inactive. Please contact U-GO support." });
+      }
       if (!user.password.startsWith('scrypt$')) {
         await routeStorage.updateUser(user.id, { password: await hashPassword(parsed.password) });
       }
@@ -591,15 +595,24 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       return res.status(400).json({ message: "Payment proof must be a PNG or JPEG image" });
     }
 
+    const exactFare = Number(ride.fare?.totalFare);
+    if (!Number.isFinite(exactFare) || exactFare <= 0) {
+      return res.status(400).json({ message: "This ride does not have a payable fare" });
+    }
+
     const updated = await routeStorage.updateRide(ride.id, {
       payment: {
         method,
         status: method === 'cash' ? 'pending_cash' : 'pending_verification',
+        amount: method === 'cash'
+          ? roundCashFare(exactFare)
+          : exactFare,
         transactionReference: reference || undefined,
         proofImage,
         submittedAt: new Date().toISOString(),
       },
     });
+    if (method === 'cash') await routeStorage.postRideFinancials(updated || ride, authenticatedUserId(res) || undefined);
 
     return res.json(updated);
   });
@@ -786,6 +799,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
         ...(status === 'paid' ? { verifiedAt: new Date().toISOString() } : {}),
       },
     });
+    if (status === 'paid') await routeStorage.postRideFinancials(updated || ride);
 
     const eventType = status === 'paid' ? 'payment_paid' : status === 'failed' ? 'payment_failed' : 'payment_pending';
     const event = await routeStorage.createEvent({
@@ -829,6 +843,7 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
         verifiedBy: admin.id,
       },
     });
+    if (status === 'paid') await routeStorage.postRideFinancials(updated || ride, admin.id);
 
     return res.json(updated);
   });
@@ -1212,12 +1227,11 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       updates.startedAt = new Date().toISOString();
     } else if (status === 'completed') {
       updates.completedAt = new Date().toISOString();
-      if (ride.driverId && ride.fare) {
+      if (ride.status !== 'completed' && ride.driverId) {
         const driver = await routeStorage.getUser(ride.driverId);
         if (driver) {
           await routeStorage.updateUser(ride.driverId, {
             totalRides: (driver.totalRides || 0) + 1,
-            totalEarnings: (driver.totalEarnings || 0) + ride.fare.driverEarnings,
           });
         }
       }
@@ -1255,6 +1269,31 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     return res.json(updated);
   });
 
+  app.get("/api/drivers/me/wallet", async (_req: Request, res: Response) => {
+    const driverId = authenticatedDriverId(res);
+    if (!driverId) return res.status(403).json({ message: "Only drivers can view a wallet." });
+    return res.json(await routeStorage.getDriverWallet(driverId));
+  });
+
+  app.get("/api/drivers/me/settlements", async (_req: Request, res: Response) => {
+    const driverId = authenticatedDriverId(res);
+    if (!driverId) return res.status(403).json({ message: "Only drivers can view settlements." });
+    return res.json(await routeStorage.getSettlements({ driverId }));
+  });
+
+  app.post("/api/drivers/me/settlements", async (req: Request, res: Response) => {
+    const driverId = authenticatedDriverId(res);
+    if (!driverId) return res.status(403).json({ message: "Only drivers can request settlements." });
+    const amount = Number(req.body?.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: "Enter a positive settlement amount in Maloti." });
+    try {
+      const settlement = await routeStorage.createSettlement(driverId, Math.round(amount * 100));
+      return res.status(201).json(settlement);
+    } catch (error: any) {
+      return res.status(409).json({ message: error?.message || "Could not request settlement." });
+    }
+  });
+
   app.get("/api/events/:userId", async (req: Request, res: Response) => {
     if (res.locals.auth && authenticatedUserId(res) !== getRouteParam(req.params.userId)) return res.status(403).json({ message: "Access denied" });
     const events = await routeStorage.getEventsByUser(getRouteParam(req.params.userId));
@@ -1275,10 +1314,10 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
     const completedRides = allRides.filter(r => r.status === 'completed');
     const cancelledRides = allRides.filter(r => r.status === 'cancelled');
     const suspendedUsers = allUsers.filter(u => u.suspended);
-
-    const totalRevenue = completedRides.reduce((sum, r) => sum + (r.fare?.totalFare || 0), 0);
-    const totalDriverEarnings = completedRides.reduce((sum, r) => sum + (r.fare?.driverEarnings || 0), 0);
-    const platformRevenue = completedRides.reduce((sum, r) => sum + (r.fare?.platformFee || 0), 0);
+    const postedLedger = (await routeStorage.getLedgerTransactions()).filter(transaction => transaction.status === 'posted' && transaction.category === 'ride_earnings');
+    const totalRevenue = postedLedger.reduce((sum, transaction) => sum + transaction.amountMinor / 100, 0);
+    const totalDriverEarnings = postedLedger.reduce((sum, transaction) => sum + Number(transaction.metadata?.driverEarningsMinor || 0) / 100, 0);
+    const platformRevenue = postedLedger.reduce((sum, transaction) => sum + Number(transaction.metadata?.platformCommissionMinor || 0) / 100, 0);
 
     return res.json({
       totalDrivers: drivers.length,
@@ -1311,6 +1350,119 @@ export async function registerRoutes(app: Express, routeStorage: IStorage = stor
       return safe;
     });
     return res.json(filtered);
+  });
+
+  app.post("/api/admin/users", async (req: Request, res: Response) => {
+    try {
+      const parsed = registerSchema.parse(req.body);
+      const temporaryPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+      if (temporaryPassword.length < 8) {
+        return res.status(400).json({ message: "Use a temporary password with at least 8 characters." });
+      }
+      if (await routeStorage.getUserByUsername(parsed.username)) {
+        return res.status(409).json({ message: "That username is already in use. Choose another one." });
+      }
+      const created = await routeStorage.createUser({
+        username: parsed.username,
+        password: await hashPassword(temporaryPassword),
+        role: parsed.role,
+        fullName: parsed.fullName,
+        phone: parsed.phone,
+        email: typeof req.body?.email === 'string' ? req.body.email.trim() || undefined : undefined,
+        active: true,
+        isOnline: false,
+        vehicleInfo: parsed.vehicleInfo,
+        rating: parsed.role === 'driver' ? 5 : undefined,
+        totalRides: 0,
+        totalEarnings: 0,
+      });
+      return res.status(201).json(publicUser(created));
+    } catch (error: any) {
+      return res.status(400).json({ message: error?.message || "Could not create the account." });
+    }
+  });
+
+  app.get("/api/admin/users/:id/profile", async (req: Request, res: Response) => {
+    const user = await routeStorage.getUser(getRouteParam(req.params.id));
+    if (!user || user.role === 'admin') return res.status(404).json({ message: "User not found" });
+    const rides = user.role === 'driver'
+      ? await routeStorage.getRidesByDriver(user.id)
+      : await routeStorage.getRidesByRider(user.id);
+    const wallet = user.role === 'driver' ? await routeStorage.getDriverWallet(user.id) : null;
+    const settlements = user.role === 'driver' ? await routeStorage.getSettlements({ driverId: user.id }) : [];
+    const ledger = user.role === 'driver' ? await routeStorage.getLedgerTransactions({ driverId: user.id }) : [];
+    const activity = await routeStorage.getEventsByUser(user.id);
+    return res.json({ user: publicUser(user), rides, wallet, settlements, ledger, activity });
+  });
+
+  app.put("/api/admin/users/:id", async (req: Request, res: Response) => {
+    const user = await routeStorage.getUser(getRouteParam(req.params.id));
+    if (!user || user.role === 'admin') return res.status(404).json({ message: "User not found" });
+    const updates: Partial<typeof user> = {};
+    if (typeof req.body?.fullName === 'string' && req.body.fullName.trim()) updates.fullName = req.body.fullName.trim();
+    if (typeof req.body?.phone === 'string' && req.body.phone.trim()) updates.phone = req.body.phone.trim();
+    if (typeof req.body?.email === 'string') updates.email = req.body.email.trim() || undefined;
+    if (req.body?.vehicleInfo !== undefined && user.role === 'driver') updates.vehicleInfo = req.body.vehicleInfo;
+    const updated = await routeStorage.updateUser(user.id, updates);
+    return res.json(updated ? publicUser(updated) : publicUser(user));
+  });
+
+  app.put("/api/admin/users/:id/active", async (req: Request, res: Response) => {
+    const user = await routeStorage.getUser(getRouteParam(req.params.id));
+    if (!user || user.role === 'admin') return res.status(404).json({ message: "User not found" });
+    const active = typeof req.body?.active === 'boolean' ? req.body.active : user.active !== false;
+    const updated = await routeStorage.updateUser(user.id, { active, isOnline: active ? user.isOnline : false });
+    return res.json(updated ? publicUser(updated) : publicUser(user));
+  });
+
+  app.get("/api/admin/wallets/:driverId", async (req: Request, res: Response) => {
+    const driver = await routeStorage.getUser(getRouteParam(req.params.driverId));
+    if (!driver || driver.role !== 'driver') return res.status(404).json({ message: "Driver not found" });
+    return res.json(await routeStorage.getDriverWallet(driver.id));
+  });
+
+  app.get("/api/admin/ledger", async (req: Request, res: Response) => {
+    const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : undefined;
+    const rideId = typeof req.query.rideId === 'string' ? req.query.rideId : undefined;
+    return res.json(await routeStorage.getLedgerTransactions({ driverId, rideId }));
+  });
+
+  app.get("/api/admin/settlements", async (req: Request, res: Response) => {
+    const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : undefined;
+    const status = typeof req.query.status === 'string' ? req.query.status as any : undefined;
+    return res.json(await routeStorage.getSettlements({ driverId, status }));
+  });
+
+  app.post("/api/admin/settlements", async (req: Request, res: Response) => {
+    const driverId = typeof req.body?.driverId === 'string' ? req.body.driverId : '';
+    const amount = Number(req.body?.amount);
+    const driver = await routeStorage.getUser(driverId);
+    if (!driver || driver.role !== 'driver') return res.status(404).json({ message: "Driver not found" });
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: "Enter a positive settlement amount in Maloti." });
+    try {
+      const settlement = await routeStorage.createSettlement(driverId, Math.round(amount * 100));
+      return res.status(201).json(settlement);
+    } catch (error: any) {
+      return res.status(409).json({ message: error?.message || "Could not create settlement." });
+    }
+  });
+
+  app.put("/api/admin/settlements/:id", async (req: Request, res: Response) => {
+    const status = req.body?.status;
+    const validStatuses = ['UNDER_REVIEW', 'APPROVED', 'PROCESSING', 'PAID', 'REJECTED', 'FAILED', 'CANCELLED'];
+    if (!validStatuses.includes(status)) return res.status(400).json({ message: "Choose a valid settlement status." });
+    try {
+      const settlement = await routeStorage.updateSettlement(getRouteParam(req.params.id), {
+        status,
+        rejectionReason: typeof req.body?.rejectionReason === 'string' ? req.body.rejectionReason.trim() : undefined,
+        paymentReference: typeof req.body?.paymentReference === 'string' ? req.body.paymentReference.trim() : undefined,
+        paymentEvidence: typeof req.body?.paymentEvidence === 'string' ? req.body.paymentEvidence : undefined,
+      }, res.locals.auth?.sub);
+      if (!settlement) return res.status(404).json({ message: "Settlement not found" });
+      return res.json(settlement);
+    } catch (error: any) {
+      return res.status(409).json({ message: error?.message || "Settlement could not be updated." });
+    }
   });
 
   app.get("/api/admin/kyc", async (_req: Request, res: Response) => {

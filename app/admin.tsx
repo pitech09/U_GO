@@ -46,7 +46,27 @@ interface KycRecord extends SafeUser {
   kyc: DriverKyc;
 }
 
-type AdminTab = 'overview' | 'rides' | 'payments' | 'users' | 'kyc' | 'settings';
+type AdminTab = 'overview' | 'rides' | 'payments' | 'users' | 'kyc' | 'finance' | 'settings';
+
+interface WalletSummary {
+  driverId: string;
+  lifetimeEarningsMinor: number;
+  availableEarningsMinor: number;
+  pendingEarningsMinor: number;
+  reservedEarningsMinor: number;
+  completedSettlementsMinor: number;
+  outstandingCashCommissionsMinor: number;
+}
+
+interface Settlement {
+  id: string;
+  driverId: string;
+  amountMinor: number;
+  status: string;
+  requestedAt: string;
+  rejectionReason?: string;
+  paymentReference?: string;
+}
 
 export default function AdminScreen() {
   const insets = useSafeAreaInsets();
@@ -58,6 +78,8 @@ export default function AdminScreen() {
   const [users, setUsers] = useState<SafeUser[]>([]);
   const [kycRecords, setKycRecords] = useState<KycRecord[]>([]);
   const [config, setConfig] = useState<PlatformConfig | null>(null);
+  const [wallets, setWallets] = useState<Record<string, WalletSummary>>({});
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -68,18 +90,27 @@ export default function AdminScreen() {
   const fetchAll = useCallback(async () => {
     try {
       const baseUrl = getApiUrl();
-      const [statsRes, ridesRes, usersRes, configRes, kycRes] = await Promise.all([
+      const [statsRes, ridesRes, usersRes, configRes, kycRes, settlementsRes] = await Promise.all([
         authenticatedFetch(new URL('/api/admin/stats', baseUrl).toString()),
         authenticatedFetch(new URL('/api/admin/rides', baseUrl).toString()),
         authenticatedFetch(new URL('/api/admin/users', baseUrl).toString()),
         authenticatedFetch(new URL('/api/admin/config', baseUrl).toString()),
         authenticatedFetch(new URL('/api/admin/kyc', baseUrl).toString()),
+        authenticatedFetch(new URL('/api/admin/settlements', baseUrl).toString()),
       ]);
       setStats(await statsRes.json());
       setRides(await ridesRes.json());
-      setUsers(await usersRes.json());
+      const loadedUsers = await usersRes.json();
+      setUsers(loadedUsers);
       setConfig(await configRes.json());
       setKycRecords(await kycRes.json());
+      setSettlements(await settlementsRes.json());
+      const driverUsers = loadedUsers.filter((candidate: SafeUser) => candidate.role === 'driver');
+      const walletResults = await Promise.all(driverUsers.map(async (driver: SafeUser) => {
+        const walletRes = await authenticatedFetch(new URL(`/api/admin/wallets/${driver.id}`, baseUrl).toString());
+        return walletRes.ok ? [driver.id, await walletRes.json()] as const : null;
+      }));
+      setWallets(Object.fromEntries(walletResults.filter((entry): entry is readonly [string, WalletSummary] => Boolean(entry))));
     } catch {} finally {
       setLoading(false);
       setRefreshing(false);
@@ -178,6 +209,24 @@ export default function AdminScreen() {
     }
   };
 
+  const updateSettlement = async (id: string, status: string) => {
+    setActionLoading(`settlement-${id}`);
+    try {
+      const baseUrl = getApiUrl();
+      const res = await authenticatedFetch(new URL(`/api/admin/settlements/${id}`, baseUrl).toString(), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.message || 'Could not update settlement');
+      setSettlements(previous => previous.map(item => item.id === id ? body : item));
+      fetchAll();
+    } catch (error: any) {
+      showAlert('Settlement update failed', error.message || 'Could not update settlement.');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const updateConfig = async (updates: Partial<PlatformConfig>) => {
     try {
       const baseUrl = getApiUrl();
@@ -239,14 +288,14 @@ export default function AdminScreen() {
       </View>
 
       <View style={styles.tabBar}>
-        {(['overview', 'rides', 'payments', 'users', 'kyc', 'settings'] as AdminTab[]).map(t => (
+        {(['overview', 'rides', 'payments', 'users', 'kyc', 'finance', 'settings'] as AdminTab[]).map(t => (
           <Pressable
             key={t}
             style={[styles.tabItem, tab === t && styles.tabActive]}
             onPress={() => setTab(t)}
           >
             <Ionicons
-              name={t === 'overview' ? 'stats-chart' : t === 'rides' ? 'car' : t === 'payments' ? 'wallet' : t === 'users' ? 'people' : t === 'kyc' ? 'shield-checkmark' : 'settings'}
+              name={t === 'overview' ? 'stats-chart' : t === 'rides' ? 'car' : t === 'payments' ? 'wallet' : t === 'users' ? 'people' : t === 'kyc' ? 'shield-checkmark' : t === 'finance' ? 'cash' : 'settings'}
               size={16}
               color={tab === t ? Colors.textWhite : Colors.textLight}
             />
@@ -271,6 +320,7 @@ export default function AdminScreen() {
           <UsersTab users={users} suspendUser={suspendUser} deleteUser={deleteUser} actionLoading={actionLoading} />
         )}
         {tab === 'kyc' && <KycTab records={kycRecords} reviewKyc={reviewKyc} actionLoading={actionLoading} />}
+        {tab === 'finance' && <FinanceTab users={users} wallets={wallets} settlements={settlements} updateSettlement={updateSettlement} actionLoading={actionLoading} />}
         {tab === 'settings' && config && (
           <SettingsTab config={config} updateConfig={updateConfig} />
         )}
@@ -657,6 +707,55 @@ function UserCard({ user: u, suspendUser, deleteUser, actionLoading }: {
         )}
       </View>
     </View>
+  );
+}
+
+function FinanceTab({ users, wallets, settlements, updateSettlement, actionLoading }: {
+  users: SafeUser[];
+  wallets: Record<string, WalletSummary>;
+  settlements: Settlement[];
+  updateSettlement: (id: string, status: string) => void;
+  actionLoading: string | null;
+}) {
+  const drivers = users.filter(user => user.role === 'driver');
+  const money = (minor: number) => `M${(minor / 100).toFixed(2)}`;
+  const driverName = (id: string) => drivers.find(driver => driver.id === id)?.fullName || id.slice(0, 8);
+
+  return (
+    <>
+      <Text style={styles.sectionTitle}>Driver Wallets</Text>
+      <Text style={styles.sectionHint}>Balances are calculated from posted ledger transactions. They are not manually editable.</Text>
+      {drivers.length === 0 ? <View style={styles.emptyState}><Text style={styles.emptyText}>No drivers yet</Text></View> : drivers.map(driver => {
+        const wallet = wallets[driver.id];
+        if (!wallet) return null;
+        return <View key={driver.id} style={styles.financeCard}>
+          <View style={styles.userHeader}><View><Text style={styles.userName}>{driver.fullName}</Text><Text style={styles.userPhone}>{driver.phone}</Text></View><Text style={styles.walletAvailable}>{money(wallet.availableEarningsMinor)}</Text></View>
+          <View style={styles.financeGrid}>
+            <Text style={styles.financeLabel}>Lifetime{`\n`}{money(wallet.lifetimeEarningsMinor)}</Text>
+            <Text style={styles.financeLabel}>Pending{`\n`}{money(wallet.pendingEarningsMinor)}</Text>
+            <Text style={styles.financeLabel}>Reserved{`\n`}{money(wallet.reservedEarningsMinor)}</Text>
+            <Text style={styles.financeLabel}>Cash commission{`\n`}{money(wallet.outstandingCashCommissionsMinor)}</Text>
+          </View>
+        </View>;
+      })}
+
+      <Text style={[styles.sectionTitle, { marginTop: 20 }]}>Settlement Requests ({settlements.length})</Text>
+      {settlements.length === 0 ? <View style={styles.emptyState}><Ionicons name="checkmark-circle" size={36} color={Colors.success} /><Text style={styles.emptyText}>No settlement requests</Text></View> : settlements.map(settlement => {
+        const canReview = ['REQUESTED', 'UNDER_REVIEW'].includes(settlement.status);
+        const canProcess = settlement.status === 'APPROVED';
+        const canPay = settlement.status === 'PROCESSING';
+        return <View key={settlement.id} style={styles.financeCard}>
+          <View style={styles.userHeader}><View><Text style={styles.userName}>{driverName(settlement.driverId)}</Text><Text style={styles.userPhone}>{new Date(settlement.requestedAt).toLocaleString()}</Text></View><Text style={styles.settlementStatus}>{settlement.status.replace('_', ' ')}</Text></View>
+          <Text style={styles.settlementAmount}>{money(settlement.amountMinor)}</Text>
+          <View style={styles.paymentActions}>
+            {canReview && <Pressable style={styles.paymentApproveBtn} onPress={() => updateSettlement(settlement.id, 'APPROVED')} disabled={actionLoading === `settlement-${settlement.id}`}><Text style={styles.paymentApproveText}>Approve</Text></Pressable>}
+            {canReview && <Pressable style={styles.paymentRejectBtn} onPress={() => updateSettlement(settlement.id, 'REJECTED')} disabled={actionLoading === `settlement-${settlement.id}`}><Text style={styles.paymentRejectText}>Reject</Text></Pressable>}
+            {canProcess && <Pressable style={styles.paymentApproveBtn} onPress={() => updateSettlement(settlement.id, 'PROCESSING')}><Text style={styles.paymentApproveText}>Start payment</Text></Pressable>}
+            {canPay && <Pressable style={styles.paymentApproveBtn} onPress={() => updateSettlement(settlement.id, 'PAID')}><Text style={styles.paymentApproveText}>Mark paid</Text></Pressable>}
+          </View>
+        </View>;
+      })}
+    </>
   );
 }
 
@@ -1217,6 +1316,14 @@ const styles = StyleSheet.create({
   kycCard: {
     backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 16, padding: 14, marginBottom: 10,
   },
+  financeCard: {
+    backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 16, padding: 14, marginBottom: 10,
+  },
+  walletAvailable: { color: Colors.primary, fontSize: 18, fontFamily: 'Inter_700Bold' },
+  financeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 12 },
+  financeLabel: { color: Colors.textLight, fontSize: 11, lineHeight: 17, width: '46%' },
+  settlementStatus: { color: Colors.accent, fontSize: 11, fontFamily: 'Inter_700Bold' },
+  settlementAmount: { color: Colors.textWhite, fontSize: 24, fontFamily: 'Inter_700Bold', marginTop: 12 },
   userHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
   userPhone: { color: Colors.textLight, fontSize: 12, marginTop: 3 },
   kycImages: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },

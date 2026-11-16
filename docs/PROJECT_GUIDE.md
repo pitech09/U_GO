@@ -94,6 +94,8 @@ Each completed ride records:
 - the platform's fee;
 - the payment method and payment status when supplied.
 
+For cash, the rider-facing amount is rounded to the nearest whole loti so the driver does not need to collect small change. Digital payments keep the exact two-decimal fare. The exact calculated fare and rounded cash amount are stored separately.
+
 The application currently supports cash records and manual/mobile-money payment flows. Live M-Pesa or EcoCash collection requires approved merchant credentials, provider callbacks, and production verification before launch.
 
 ## 8. Maps and location

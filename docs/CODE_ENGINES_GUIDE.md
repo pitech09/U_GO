@@ -93,7 +93,7 @@ driverEarnings = totalFare x driverSharePercent
 platformFee    = totalFare - driverEarnings
 ```
 
-All returned money values are rounded to two decimal places. The calculated fare is saved on the ride, which protects historical rides from later fare-setting changes.
+All returned digital fare values are rounded to two decimal places. A separate `cashTotalFare` rounds the total to the nearest whole loti for cash collection. The calculated fare is saved on the ride, which protects historical rides from later fare-setting changes. Cash payment records store the rounded amount, while mobile-money records store the exact amount.
 
 ### Distance and eligibility engine
 

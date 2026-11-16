@@ -9,6 +9,7 @@ export interface FareBreakdown {
   sharedRideDiscountPercent: number;
   groupDiscountPercent: number;
   totalFare: number;
+  cashTotalFare: number;
   driverEarnings: number;
   platformFee: number;
   parcelFare?: number;
@@ -17,6 +18,10 @@ export interface FareBreakdown {
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+export function roundCashFare(value: number): number {
+  return Math.round(value);
 }
 
 export function calculateFareBreakdown(
@@ -55,6 +60,7 @@ export function calculateFareBreakdown(
       sharedRideDiscountPercent: 0,
       groupDiscountPercent: 0,
       totalFare: round2(totalFare),
+      cashTotalFare: roundCashFare(totalFare),
       driverEarnings: round2(totalFare * driverPercent),
       platformFee: round2(totalFare * (1 - driverPercent)),
     };
@@ -98,6 +104,7 @@ export function calculateFareBreakdown(
     sharedRideDiscountPercent: appliedDiscountPercent,
     groupDiscountPercent: 0,
     totalFare: round2(totalFare),
+    cashTotalFare: roundCashFare(totalFare),
     driverEarnings: round2(totalFare * driverPercent),
     platformFee: round2(totalFare * (1 - driverPercent)),
     parcelFare: round2(parcelFare),

@@ -23,6 +23,7 @@ import Animated, { FadeInDown, FadeInUp, SlideInDown, FadeIn } from 'react-nativ
 import * as Haptics from 'expo-haptics';
 import type { Ride, User } from '@shared/schema';
 import { calculateDistance } from '@shared/distance';
+import { roundCashFare } from '@shared/fare';
 import { playRideUpdateSound } from '@/lib/sound-notifications';
 
 const { width, height } = Dimensions.get('window');
@@ -1125,6 +1126,9 @@ export default function RiderScreen() {
             <View style={styles.fareMain}>
               <Text style={styles.fareLabel}>Estimated Fare</Text>
               <Text style={styles.farePrice}>M{fareEstimate.totalFare.toFixed(2)}</Text>
+              <Text style={styles.cashFareNote}>
+                Cash payment: M{(fareEstimate.cashTotalFare ?? roundCashFare(fareEstimate.totalFare)).toFixed(0)}
+              </Text>
             </View>
             <View style={styles.fareDetails}>
               <FareRow label="Base fare" value={`M${fareEstimate.baseFare.toFixed(2)}`} />
@@ -1287,7 +1291,11 @@ export default function RiderScreen() {
             <View style={styles.ridePaymentCard}>
               <View style={styles.ridePaymentHeader}>
                 <Text style={styles.ridePaymentTitle}>{activeRide.cancellationPaymentRequired ? 'Pay cancellation charge' : 'Pay for this ride'}</Text>
-                <Text style={styles.ridePaymentAmount}>M{activeRide.fare?.totalFare.toFixed(2) ?? '0.00'}</Text>
+                <Text style={styles.ridePaymentAmount}>
+                  M{paymentMethod === 'cash'
+                    ? (activeRide.fare?.cashTotalFare ?? roundCashFare(activeRide.fare?.totalFare ?? 0)).toFixed(0)
+                    : (activeRide.fare?.totalFare ?? 0).toFixed(2)}
+                </Text>
               </View>
               <View style={styles.paymentMethodRow}>
                 {([
@@ -1347,7 +1355,11 @@ export default function RiderScreen() {
           {activeRide.fare && (
             <View style={styles.rideFareRow}>
               <Text style={styles.rideFareLabel}>Fare</Text>
-              <Text style={styles.rideFareValue}>M{activeRide.fare.totalFare.toFixed(2)}</Text>
+              <Text style={styles.rideFareValue}>
+                M{activeRide.payment?.method === 'cash'
+                  ? (activeRide.payment.amount ?? activeRide.fare.cashTotalFare ?? roundCashFare(activeRide.fare.totalFare)).toFixed(0)
+                  : activeRide.fare.totalFare.toFixed(2)}
+              </Text>
             </View>
           )}
 
@@ -1370,7 +1382,11 @@ export default function RiderScreen() {
               </View>
               <Text style={styles.completedTitle}>Ride Complete!</Text>
               {activeRide.fare && (
-                <Text style={styles.completedFare}>M{activeRide.fare.totalFare.toFixed(2)}</Text>
+                <Text style={styles.completedFare}>
+                  M{activeRide.payment?.method === 'cash'
+                    ? (activeRide.payment.amount ?? activeRide.fare.cashTotalFare ?? roundCashFare(activeRide.fare.totalFare)).toFixed(0)
+                    : activeRide.fare.totalFare.toFixed(2)}
+                </Text>
               )}
             </View>
 
@@ -1702,6 +1718,9 @@ const styles = StyleSheet.create({
   },
   farePrice: {
     fontSize: 28, fontFamily: 'Inter_700Bold', color: Colors.text,
+  },
+  cashFareNote: {
+    color: Colors.primary, fontSize: 12, fontFamily: 'Inter_600SemiBold', marginTop: 3,
   },
   fareDetails: { gap: 6 },
   fareRow: {
